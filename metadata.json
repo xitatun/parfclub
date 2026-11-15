@@ -1,0 +1,6 @@
+{
+  "name": "Ателье Эссенций",
+  "description": "Парфюмерная мастерская: проекты, формулы и соотношение компонентов, ольфакторные карты, журнал проб, смета и каталог ингредиентов.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
