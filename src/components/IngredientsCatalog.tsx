@@ -1,8 +1,12 @@
 import {
   Check,
+  ChevronDown,
+  ChevronUp,
+  ChevronsUpDown,
   ClipboardCopy,
   ClipboardPaste,
   Edit3,
+  ExternalLink,
   FileSpreadsheet,
   Filter,
   ListPlus,
@@ -19,6 +23,7 @@ import {
 import { useMemo, useState } from 'react';
 import {
   DEFAULT_VIEW_SETTINGS,
+  FAMILY_HEX_MAP,
   formatUnit,
   getCurrencySymbol,
   getIngredientOriginLabel,
@@ -30,6 +35,7 @@ import {
   STARTER_INGREDIENT_TAGS,
 } from '../data/constants';
 import { tr } from '../data/i18n';
+import { resolveIfraStandard } from '../data/ifraStandards';
 import type {
   AppCurrency,
   AppLanguage,
@@ -52,7 +58,6 @@ import {
   formatCurrencyRub,
   isIngredientRunningLow,
 } from '../utils/calculations';
-import { exportIngredientsToExcel } from '../utils/excelExport';
 import { generateId, todayIsoDate } from '../utils/storage';
 
 interface IngredientsCatalogProps {
@@ -83,6 +88,7 @@ interface IngredientsCatalogProps {
   onDeleteIngredient: (id: string) => void;
   onAddPurchaseRecord: (record: PurchaseRecord) => void;
   onAddEstimateItem: (item: ProjectEstimateItem) => void;
+  estimates?: ProjectEstimateItem[];
   availableTags?: string[];
   tagCounts?: Record<string, number>;
   onCreateTag?: (tag: string) => void;
@@ -258,6 +264,15 @@ interface IngredientsCatalogText {
   criticalThresholdLabel: string;
   filterCriticalBtn: (count: number) => string;
   showAllStockBtn: string;
+  detailsBtn: string;
+  hideDetailsBtn: string;
+  expandAllBtn: string;
+  collapseAllBtn: string;
+  colStockVolume: string;
+  runningLowBadge: string;
+  bottleLabelInputLabel: string;
+  bottleLabelPlaceholder: string;
+  openUrlTitle: string;
 }
 
 const ING_CATALOG_TEXT: Record<AppLanguage, IngredientsCatalogText> = {
@@ -403,6 +418,15 @@ const ING_CATALOG_TEXT: Record<AppLanguage, IngredientsCatalogText> = {
     criticalThresholdLabel: 'Порог:',
     filterCriticalBtn: (count) => `Показать критические (${count})`,
     showAllStockBtn: 'Показать все',
+    detailsBtn: 'Дополнительно',
+    hideDetailsBtn: 'Свернуть',
+    expandAllBtn: 'Развернуть все',
+    collapseAllBtn: 'Свернуть все',
+    colStockVolume: 'Остаток и объём',
+    runningLowBadge: 'Заканчивается',
+    bottleLabelInputLabel: 'Подпись на бутылке:',
+    bottleLabelPlaceholder: 'Как подписано на бутылке...',
+    openUrlTitle: 'Открыть ссылку в новой вкладке',
   },
   en: {
     gUnit: 'g',
@@ -546,6 +570,15 @@ const ING_CATALOG_TEXT: Record<AppLanguage, IngredientsCatalogText> = {
     criticalThresholdLabel: 'Threshold:',
     filterCriticalBtn: (count) => `Critical only (${count})`,
     showAllStockBtn: 'Show all',
+    detailsBtn: 'Details',
+    hideDetailsBtn: 'Collapse',
+    expandAllBtn: 'Expand all',
+    collapseAllBtn: 'Collapse all',
+    colStockVolume: 'Stock & volume',
+    runningLowBadge: 'Running low',
+    bottleLabelInputLabel: 'Bottle label:',
+    bottleLabelPlaceholder: 'How the bottle is labeled...',
+    openUrlTitle: 'Open link in new tab',
   },
   it: {
     gUnit: 'g',
@@ -689,6 +722,15 @@ const ING_CATALOG_TEXT: Record<AppLanguage, IngredientsCatalogText> = {
     criticalThresholdLabel: 'Soglia:',
     filterCriticalBtn: (count) => `Solo scorte critiche (${count})`,
     showAllStockBtn: 'Mostra tutti',
+    detailsBtn: 'Dettagli',
+    hideDetailsBtn: 'Comprimi',
+    expandAllBtn: 'Espandi tutto',
+    collapseAllBtn: 'Comprimi tutto',
+    colStockVolume: 'Giacenza e volume',
+    runningLowBadge: 'In esaurimento',
+    bottleLabelInputLabel: 'Etichetta flacone:',
+    bottleLabelPlaceholder: 'Firma sul flacone...',
+    openUrlTitle: 'Apri link in una nuova scheda',
   },
   es: {
     gUnit: 'g',
@@ -832,6 +874,15 @@ const ING_CATALOG_TEXT: Record<AppLanguage, IngredientsCatalogText> = {
     criticalThresholdLabel: 'Umbral:',
     filterCriticalBtn: (count) => `Solo críticos (${count})`,
     showAllStockBtn: 'Mostrar todos',
+    detailsBtn: 'Detalles',
+    hideDetailsBtn: 'Plegar',
+    expandAllBtn: 'Desplegar todo',
+    collapseAllBtn: 'Plegar todo',
+    colStockVolume: 'Stock y volumen',
+    runningLowBadge: 'Agotándose',
+    bottleLabelInputLabel: 'Etiqueta frasco:',
+    bottleLabelPlaceholder: 'Firma en el frasco...',
+    openUrlTitle: 'Abrir enlace en nueva pestaña',
   },
   de: {
     gUnit: 'g',
@@ -975,6 +1026,15 @@ const ING_CATALOG_TEXT: Record<AppLanguage, IngredientsCatalogText> = {
     criticalThresholdLabel: 'Schwelle:',
     filterCriticalBtn: (count) => `Nur kritische (${count})`,
     showAllStockBtn: 'Alle anzeigen',
+    detailsBtn: 'Details',
+    hideDetailsBtn: 'Einklappen',
+    expandAllBtn: 'Alle ausklappen',
+    collapseAllBtn: 'Alle einklappen',
+    colStockVolume: 'Bestand & Menge',
+    runningLowBadge: 'Wird knapp',
+    bottleLabelInputLabel: 'Flaschenetikett:',
+    bottleLabelPlaceholder: 'Flaschenbeschriftung...',
+    openUrlTitle: 'Link in neuem Tab öffnen',
   },
 };
 
@@ -983,6 +1043,7 @@ export function IngredientsCatalog({
   filteredIngredients,
   library = [],
   projects,
+  estimates = [],
   viewSettings = DEFAULT_VIEW_SETTINGS,
   language = 'ru',
   currency = 'RUB',
@@ -1015,6 +1076,29 @@ export function IngredientsCatalog({
   // Clipboard feedback per ingredient ID or modal
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [clipboardHint, setClipboardHint] = useState<string | null>(null);
+
+  // Expanded state for compact view accordion
+  const [expandedIngIds, setExpandedIngIds] = useState<Set<string>>(new Set());
+
+  const toggleExpandIngredient = (id: string) => {
+    setExpandedIngIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+  };
+
+  const handleExpandAll = () => {
+    setExpandedIngIds(new Set(filteredIngredients.map((i) => i.id)));
+  };
+
+  const handleCollapseAll = () => {
+    setExpandedIngIds(new Set());
+  };
 
   // Modal Editor State
   const [modalOpen, setModalOpen] = useState(false);
@@ -1268,6 +1352,18 @@ export function IngredientsCatalog({
     }
   };
 
+  const handleQuickStatusChange = (ing: Ingredient, newStatus: IngredientStatus) => {
+    if (ing.status === newStatus) return;
+    if (newStatus === 'in_stock') {
+      handleMarkAsPurchased(ing);
+      return;
+    }
+    onUpdateIngredient({
+      ...ing,
+      status: newStatus,
+    });
+  };
+
   const handleConfirmAddToEstimate = (e: React.FormEvent) => {
     e.preventDefault();
     if (!estimateTargetIng || !estimateProjectId) return;
@@ -1357,7 +1453,11 @@ export function IngredientsCatalog({
         <div className="flex flex-wrap items-center gap-2 shrink-0">
           <button
             type="button"
-            onClick={() => exportIngredientsToExcel(filteredIngredients, language, currency)}
+            onClick={() => {
+              void import('../utils/excelExport').then(({ exportIngredientsToExcel }) => {
+                exportIngredientsToExcel(filteredIngredients, language, currency);
+              });
+            }}
             className="inline-flex items-center justify-center gap-2 rounded-lg border border-[#E4E4E0] bg-white px-2.5 @[800px]:px-3.5 py-2 text-sm font-medium text-[#181917] transition-colors hover:bg-[#F3F2F1] whitespace-nowrap"
             title={t.exportExcelTitle}
             aria-label={t.exportExcelAria}
@@ -1638,357 +1738,370 @@ export function IngredientsCatalog({
           )}
         </div>
       ) : (
-        <div className="space-y-3">
+        <div className="space-y-2">
+          {/* List Header Bar with Count and Expand / Collapse All */}
+          <div className="flex items-center justify-between px-3 py-1.5 text-xs text-[#6B6D68]">
+            <div className="flex items-center gap-2">
+              <span className="font-semibold text-[#181917]">
+                {tr(language, {
+                  ru: `Ингредиенты: ${filteredIngredients.length}`,
+                  en: `Ingredients: ${filteredIngredients.length}`,
+                  it: `Ingredienti: ${filteredIngredients.length}`,
+                  es: `Ingredientes: ${filteredIngredients.length}`,
+                  de: `Rohstoffe: ${filteredIngredients.length}`,
+                })}
+              </span>
+              {filteredIngredients.length !== ingredients.length && (
+                <span className="text-[11px] text-[#8B8D87]">
+                  {tr(language, {
+                    ru: `(из ${ingredients.length})`,
+                    en: `(of ${ingredients.length})`,
+                    it: `(su ${ingredients.length})`,
+                    es: `(de ${ingredients.length})`,
+                    de: `(von ${ingredients.length})`,
+                  })}
+                </span>
+              )}
+            </div>
+
+            <div className="flex items-center gap-2">
+              {expandedIngIds.size > 0 ? (
+                <button
+                  type="button"
+                  onClick={handleCollapseAll}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-[#E4E4E0] bg-white px-2.5 py-1 text-xs font-medium text-[#4B4D48] hover:bg-[#F3F2F1] transition-colors"
+                >
+                  <ChevronUp className="h-3.5 w-3.5" />
+                  <span>{t.collapseAllBtn}</span>
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={handleExpandAll}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-[#E4E4E0] bg-white px-2.5 py-1 text-xs font-medium text-[#4B4D48] hover:bg-[#F3F2F1] transition-colors"
+                >
+                  <ChevronsUpDown className="h-3.5 w-3.5" />
+                  <span>{t.expandAllBtn}</span>
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* Desktop Column Header */}
+          <div className="hidden lg:flex items-center justify-between gap-3 px-4 py-2 rounded-lg bg-[#FAF9F8] border border-[#EAEAE6] text-[11px] font-semibold text-[#6B6D68]">
+            <div className="flex-1 min-w-0">{t.colIngredient}</div>
+            <div className="flex items-center justify-end gap-4 shrink-0">
+              <div className="w-[130px] text-right">{t.colStockVolume}</div>
+              <div className="w-[120px] text-right">{t.colUnitPrice}</div>
+              <div className="w-[110px] text-left pl-1">{t.colStatus}</div>
+              <div className="w-[160px] text-right pr-1">{t.colActions}</div>
+            </div>
+          </div>
+
           {filteredIngredients.map((ing) => {
             const unitPrice = ing.quantityGrams > 0 ? ing.priceTotal / ing.quantityGrams : 0;
             const unitLabel = formatUnit(ing.unit, language);
+            const isExpanded = expandedIngIds.has(ing.id);
+            const runningLow = isIngredientRunningLow(ing);
 
             return (
               <article
                 key={ing.id}
-                className="rounded-xl border border-[#E4E4E0] hover:border-[#C8C8C2] bg-white overflow-hidden transition-colors"
+                className="rounded-xl border border-[#E4E4E0] hover:border-[#C8C8C2] bg-white overflow-hidden transition-all shadow-xs"
               >
-                {/* Top structured grid of specs */}
-                <div className="overflow-x-auto">
-                  <table
-                    className={`w-full ${
-                      viewSettings.showIngredientSpecsExtra ? 'min-w-[780px]' : 'min-w-[580px]'
-                    } border-collapse text-left text-sm`}
-                  >
-                    <thead>
-                      <tr className="border-b border-[#EAEAE6] bg-[#FAF9F8] text-[11px] font-semibold text-[#6B6D68]">
-                        <th className="py-2 pl-5 pr-3">{t.colIngredient}</th>
-                        <th className="py-2 px-2.5">{t.colFamilyTier}</th>
-                        {viewSettings.showIngredientSpecsExtra && (
-                          <>
-                            <th className="py-2 px-2.5">{t.colLongevitySillage}</th>
-                            <th className="py-2 px-2.5 text-right">{t.colMaxPct}</th>
-                          </>
-                        )}
-                        <th className="py-2 px-2.5 text-right">{t.colUnitPrice}</th>
-                        <th className="py-2 px-2.5">{t.colStorePurchased}</th>
-                        {viewSettings.showIngredientSpecsExtra && (
-                          <th className="py-2 px-2.5">{t.colStorage}</th>
-                        )}
-                        <th className="py-2 px-2.5">{t.colStatus}</th>
-                        <th className="py-2 pl-2 pr-5 text-right">{t.colActions}</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      <tr className="align-top">
-                        <td className="py-3 pl-5 pr-3">
-                          <div className="font-semibold text-[#181917]">{ing.name}</div>
-                          <div className="mt-0.5 flex flex-wrap items-center gap-1.5 text-[11px] text-[#6B6D68]">
-                            {viewSettings.showIngredientSpecsExtra && ing.inciOrCas && (
-                              <>
-                                <span className="font-mono">{ing.inciOrCas}</span>
-                                <span aria-hidden="true">·</span>
-                              </>
-                            )}
-                            <span>
-                              {t.dilShort} {ing.dilutionPercent}%
-                            </span>
-                            <span>·</span>
-                            <span className="tabular-nums inline-flex items-center gap-1.5">
-                              <span>
-                                {ing.quantityGrams} {unitLabel}
-                                {ing.remainingGrams !== undefined &&
-                                  ` (${t.leftShort} ${ing.remainingGrams} ${unitLabel})`}
-                              </span>
-                              {isIngredientRunningLow(ing) && (
-                                <span className="font-medium text-[#B45309]">
-                                  ·{' '}
-                                  {tr(language, {
-                                    ru: 'Заканчивается',
-                                    en: 'Running low',
-                                    it: 'In esaurimento',
-                                    es: 'Agotándose',
-                                    de: 'Wird knapp',
-                                  })}
-                                </span>
-                              )}
-                            </span>
-                          </div>
-                          <div className="mt-1.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[11px]">
-                            {(ing.tags || []).map((tag, idx) => {
-                              const isTagActive = selectedFilterTagsLower.has(tag.toLowerCase());
-                              return (
-                                <span key={tag} className="inline-flex items-center gap-2">
-                                  {idx > 0 && (
-                                    <span aria-hidden="true" className="text-[#C8C8C2]">
-                                      ·
-                                    </span>
-                                  )}
-                                  <button
-                                    type="button"
-                                    onClick={() => handleToggleFilterTag(tag)}
-                                    className={`font-medium transition-colors hover:underline ${
-                                      isTagActive
-                                        ? 'text-[var(--theme-accent)] underline'
-                                        : 'text-[#605E5C] hover:text-[var(--theme-accent)]'
-                                    }`}
-                                  >
-                                    #{tag}
-                                  </button>
-                                </span>
-                              );
-                            })}
-                            {(ing.tags || []).length > 0 && (
-                              <span aria-hidden="true" className="text-[#C8C8C2]">
-                                ·
-                              </span>
-                            )}
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setCardTagDraft('');
-                                setTagPickerIngId((prev) => (prev === ing.id ? null : ing.id));
-                              }}
-                              className="inline-flex items-center gap-1 text-[#6B6D68] hover:text-[var(--theme-accent)] font-medium"
-                            >
-                              <Tag className="h-3 w-3" />
-                              <span>{t.cardTagsBtn}</span>
-                            </button>
-                          </div>
-                        </td>
+                {/* Primary Compact Row */}
+                <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 px-4 py-2.5">
+                  {/* 1. Name & Primary Badges */}
+                  <div className="flex items-start lg:items-center gap-2.5 min-w-0 flex-1">
+                    <span
+                      className="mt-1 lg:mt-0 h-3 w-3 shrink-0 rounded-full border border-black/10 shadow-xs"
+                      style={{ backgroundColor: FAMILY_HEX_MAP[ing.family] || '#6B6D68' }}
+                      title={`${getOlfactoryFamilyLabel(ing.family, language)} · ${getNoteTierLabel(ing.tier, language)}`}
+                    />
 
-                        <td className="py-3 px-2.5 text-xs">
-                          <div className="font-medium text-[#181917]">
-                            {getOlfactoryFamilyLabel(ing.family, language)}
-                          </div>
-                          <div className="mt-0.5 text-[#6B6D68]">
-                            {getNoteTierLabel(ing.tier, language)}
-                          </div>
-                        </td>
-
-                        {viewSettings.showIngredientSpecsExtra && (
-                          <>
-                            <td className="py-3 px-2.5 text-xs">
-                              <div className="text-[#181917]">{ing.longevityLabel || '—'}</div>
-                              <div className="mt-0.5 text-[#6B6D68]">
-                                {t.sillagePrefix}{' '}
-                                {getSillageLabel(ing.sillage, language).split(' ')[0].toLowerCase()}
-                              </div>
-                            </td>
-
-                            <td className="py-3 px-2.5 text-right font-mono text-xs tabular-nums text-[#181917]">
-                              {ing.ifraLimitPercent !== undefined ? `${ing.ifraLimitPercent}%` : '—'}
-                            </td>
-                          </>
-                        )}
-
-                        <td className="py-3 px-2.5 text-right font-mono text-xs tabular-nums">
-                          <div className="font-medium text-[#181917]">
-                            {formatCurrencyDecimal(unitPrice, language, currency)}/{unitLabel}
-                          </div>
-                          <div className="text-[11px] text-[#6B6D68]">
-                            {t.packShort} {formatCurrencyRub(ing.priceTotal, language, currency)}
-                          </div>
-                        </td>
-
-                        <td className="py-3 px-2.5 text-xs">
-                          <div className="font-medium text-[#181917]">
-                            {ing.supplier || t.storeNotSet}
-                          </div>
-                          <div className="mt-0.5 font-mono text-[11px] tabular-nums text-[#6B6D68]">
-                            {ing.purchaseDate || t.notPurchased}
-                          </div>
-                        </td>
-
-                        {viewSettings.showIngredientSpecsExtra && (
-                          <td className="py-3 px-2.5 text-xs text-[#4B4D48] max-w-[180px]">
-                            {ing.storageLocation ? (
-                              <span className="inline-flex items-start gap-1">
-                                <MapPin className="h-3.5 w-3.5 shrink-0 text-[#787A74] mt-0.5" />
-                                <span>{ing.storageLocation}</span>
-                              </span>
-                            ) : (
-                              '—'
-                            )}
-                          </td>
-                        )}
-
-                        <td className="py-3 px-2.5 text-xs whitespace-nowrap">
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5">
+                        <span className="font-semibold text-sm text-[#181917] leading-snug">
+                          {ing.name}
+                        </span>
+                        <span className="inline-flex items-center rounded-md bg-[#F3F2F1] px-1.5 py-0.5 text-[10px] font-medium text-[#4B4D48] whitespace-nowrap">
+                          {ing.dilutionPercent}%{ing.solventNote ? ` ${ing.solventNote}` : ''}
+                        </span>
+                        <span className="inline-flex items-center rounded-md bg-[#FAF9F8] border border-[#EAEAE6] px-1.5 py-0.5 text-[10px] text-[#6B6D68] whitespace-nowrap">
+                          {getIngredientOriginLabel(ing.origin, language)}
+                        </span>
+                        {ing.bottleLabel && (
                           <span
-                            className={`font-medium ${
-                              ing.status === 'in_stock'
-                                ? 'text-[#15803D]'
-                                : ing.status === 'ordered'
-                                  ? 'text-[#B45309]'
-                                  : 'text-[var(--theme-accent)]'
-                            }`}
+                            className="inline-flex items-center gap-1 rounded-md bg-amber-50/80 border border-amber-200/70 px-1.5 py-0.5 text-[10px] text-amber-800 font-medium truncate max-w-[200px]"
+                            title={`${t.bottleLabelInputLabel} ${ing.bottleLabel}`}
                           >
-                            {getIngredientStatusLabel(ing.status, language)}
+                            <span>🏷️</span>
+                            <span className="truncate">{ing.bottleLabel}</span>
                           </span>
-                        </td>
+                        )}
+                      </div>
 
-                        <td className="py-3 pl-2 pr-5 text-right whitespace-nowrap">
-                          <div className="inline-flex items-center gap-1">
-                            {ing.status !== 'in_stock' && (
-                              <button
-                                type="button"
-                                onClick={() => handleMarkAsPurchased(ing)}
-                                className="inline-flex items-center gap-1 rounded border border-[#E4E4E0] bg-white px-2 py-1 text-[11px] font-medium text-[#15803D] hover:bg-[#F0FDF4]"
-                                title={t.boughtTitle}
-                              >
-                                <Check className="h-3 w-3" />
-                                <span>{t.boughtBtn}</span>
-                              </button>
-                            )}
-                            {projects.length > 0 && (
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  setEstimateTargetIng(ing);
-                                  setEstimateProjectId(projects[0].id);
-                                  setEstimateQty(String(ing.quantityGrams || 10));
-                                }}
-                                className="rounded p-1.5 text-[#575955] hover:bg-[#F1F1EE] hover:text-[#181917]"
-                                title={t.addToEstimateTitle}
-                                aria-label={t.addToEstimateAria(ing.name)}
-                              >
-                                <ShoppingCart className="h-3.5 w-3.5" />
-                              </button>
-                            )}
-                            <button
-                              type="button"
-                              onClick={() => openEditModal(ing)}
-                              className="rounded p-1.5 text-[#575955] hover:bg-[#F1F1EE] hover:text-[#181917]"
-                              title={t.editTitle}
-                              aria-label={t.editAria(ing.name)}
-                            >
-                              <Edit3 className="h-3.5 w-3.5" />
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() => onDeleteIngredient(ing.id)}
-                              className="rounded p-1.5 text-[#787A74] hover:bg-[#FEF2F2] hover:text-[#B91C1C]"
-                              title={t.deleteTitle}
-                              aria-label={t.deleteAria(ing.name)}
-                            >
-                              <Trash2 className="h-3.5 w-3.5" />
-                            </button>
-                          </div>
-                        </td>
-                      </tr>
-                    </tbody>
-                  </table>
-                </div>
-
-                {/* Inline Card Tag Assignment Bar */}
-                {tagPickerIngId === ing.id && (
-                  <div className="border-t border-[#EAEAE6] bg-[#FAF9F8] px-5 py-2.5 space-y-2 text-xs">
-                    <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                      <span className="font-medium text-[#575955]">{t.cardTagAssignLabel}</span>
-                      <form
-                        onSubmit={(e) => handleAddCardTagSubmit(e, ing)}
-                        className="flex items-center gap-1.5"
-                      >
-                        <input
-                          type="text"
-                          value={cardTagDraft}
-                          onChange={(e) => setCardTagDraft(e.target.value)}
-                          placeholder={t.cardTagInputPlaceholder}
-                          className="w-48 rounded border border-[#E4E4E0] bg-white px-2.5 py-1 text-xs text-[#181917] focus:border-[var(--theme-accent)] focus:outline-none"
-                        />
-                        <button
-                          type="submit"
-                          disabled={!cardTagDraft.trim()}
-                          className="inline-flex items-center gap-1 rounded border border-[#E4E4E0] bg-white px-2.5 py-1 text-[11px] font-medium text-[#181917] hover:bg-[#F3F2F1] disabled:opacity-40"
-                        >
-                          <Plus className="h-3 w-3 text-[var(--theme-accent)]" />
-                          <span>{t.modalTagAddBtn}</span>
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => setTagPickerIngId(null)}
-                          className="rounded p-1 text-[#605E5C] hover:bg-[#EDEBE9]"
-                          aria-label={t.closeFormAria}
-                        >
-                          <X className="h-3.5 w-3.5" />
-                        </button>
-                      </form>
-                    </div>
-                    <div className="flex flex-wrap items-center gap-1.5">
-                      {Array.from(new Set([...mergedTags, ...(ing.tags || [])])).map((tag) => {
-                        const assigned = (ing.tags || []).some(
-                          (tg) => tg.toLowerCase() === tag.toLowerCase()
-                        );
-                        return (
-                          <button
-                            key={tag}
-                            type="button"
-                            onClick={() => handleToggleTagOnIngredient(ing, tag)}
-                            className={`inline-flex items-center gap-1 rounded-lg border px-2.5 py-1 text-[11px] font-medium transition-colors ${
-                              assigned
-                                ? 'border-[var(--theme-accent)] bg-[var(--theme-accent-soft)] text-[var(--theme-accent)]'
-                                : 'border-[#E4E4E0] bg-white text-[#575955] hover:text-[#181917]'
-                            }`}
-                          >
-                            {assigned && <Check className="h-3 w-3 shrink-0" />}
-                            <span>#{tag}</span>
-                          </button>
-                        );
-                      })}
+                      {/* Subline: CAS / INCI + Category / Tier + Tags preview */}
+                      <div className="flex flex-wrap items-center gap-x-2 text-[11px] text-[#787A74] mt-0.5">
+                        {ing.inciOrCas && (
+                          <span className="font-mono">CAS: {ing.inciOrCas}</span>
+                        )}
+                        <span className="text-[#6B6D68]">
+                          {getOlfactoryFamilyLabel(ing.family, language)} · {getNoteTierLabel(ing.tier, language)}
+                        </span>
+                        {(ing.tags || []).slice(0, 3).map((tg) => (
+                          <span key={tg} className="text-[#8B8D87] font-medium">
+                            #{tg}
+                          </span>
+                        ))}
+                        {(ing.tags || []).length > 3 && (
+                          <span className="text-[#8B8D87]">
+                            +{(ing.tags || []).length - 3}
+                          </span>
+                        )}
+                      </div>
                     </div>
                   </div>
-                )}
 
-                {/* Full-Width Description, Bottle Label & Purchase Link Bar */}
-                <div className="border-t border-[#EAEAE6] bg-[#FAF9F8] px-5 py-3 space-y-2.5">
-                  <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                    <div className="w-full text-xs leading-relaxed text-[#323130]">
-                      <span className="font-semibold text-[#605E5C]">
-                        {t.scentProfileLabel}
-                      </span>
-                      {ing.olfactoryNotes || (
-                        <span className="text-[#8B8D87]">{t.noDescriptionYet}</span>
+                  {/* Right side: 2. Stock, 3. Price, 4. Status, 5. Actions */}
+                  <div className="flex flex-wrap items-center justify-between lg:justify-end gap-3 sm:gap-4 shrink-0 border-t lg:border-t-0 pt-2 lg:pt-0 border-[#F3F2F1]">
+                    {/* 2. Stock & Volume */}
+                    <div className="text-left lg:text-right min-w-[125px]">
+                      <div className="text-xs font-mono font-semibold tabular-nums text-[#181917]">
+                        {ing.quantityGrams} {unitLabel}
+                        {ing.remainingGrams !== undefined && (
+                          <span className="text-[#575955] font-normal ml-1">
+                            ({t.leftShort} {ing.remainingGrams} {unitLabel})
+                          </span>
+                        )}
+                      </div>
+                      {runningLow ? (
+                        <div className="inline-flex items-center gap-1 text-[10px] font-semibold text-[#B45309]">
+                          <span className="h-1.5 w-1.5 rounded-full bg-[#D97706] animate-pulse" />
+                          <span>{t.runningLowBadge}</span>
+                        </div>
+                      ) : (
+                        <div className="text-[10px] text-[#787A74] truncate max-w-[140px]">
+                          {ing.storageLocation ? `📍 ${ing.storageLocation}` : '—'}
+                        </div>
                       )}
                     </div>
-                    <div className="flex items-center gap-2 text-xs text-[#323130] shrink-0">
-                      <span className="text-[#605E5C] whitespace-nowrap">
-                        {tr(language, {
-                          ru: 'Подпись на бутылке:',
-                          en: 'Bottle label:',
-                          it: 'Etichetta flacone:',
-                          es: 'Etiqueta frasco:',
-                          de: 'Flaschenetikett:',
-                        })}
-                      </span>
-                      <input
-                        type="text"
-                        value={ing.bottleLabel || ''}
-                        onChange={(e) => onUpdateIngredient({ ...ing, bottleLabel: e.target.value })}
-                        placeholder={tr(language, {
-                          ru: 'Как подписано на бутылке...',
-                          en: 'How the bottle is labeled...',
-                          it: 'Firma sul flacone...',
-                          es: 'Firma en el frasco...',
-                          de: 'Flaschenbeschriftung...',
-                        })}
-                        className="w-56 rounded border border-[#E4E4E0] bg-white px-2.5 py-1 text-xs text-[#181917] placeholder:text-[#8B8D87] focus:border-[var(--theme-accent)] focus:outline-none"
-                      />
+
+                    {/* 3. Price */}
+                    <div className="text-left lg:text-right min-w-[110px]">
+                      <div className="text-xs font-mono font-semibold tabular-nums text-[#181917]">
+                        {formatCurrencyDecimal(unitPrice, language, currency)}/{unitLabel}
+                      </div>
+                      <div className="text-[10px] text-[#6B6D68] tabular-nums">
+                        {t.packShort} {formatCurrencyRub(ing.priceTotal, language, currency)}
+                      </div>
+                    </div>
+
+                    {/* 4. Status Quick Selector */}
+                    <div className="relative min-w-[110px]">
+                      <select
+                        value={ing.status}
+                        onChange={(e) => handleQuickStatusChange(ing, e.target.value as IngredientStatus)}
+                        className={`w-full appearance-none cursor-pointer rounded-lg border pl-2.5 pr-6 py-1 text-xs font-medium transition-colors focus:outline-none ${
+                          ing.status === 'in_stock'
+                            ? 'border-emerald-200 bg-emerald-50 text-emerald-800 hover:bg-emerald-100/70'
+                            : ing.status === 'ordered'
+                              ? 'border-amber-200 bg-amber-50 text-amber-800 hover:bg-amber-100/70'
+                              : 'border-sky-200 bg-sky-50 text-sky-800 hover:bg-sky-100/70'
+                        }`}
+                        title={getIngredientStatusLabel(ing.status, language)}
+                      >
+                        <option value="in_stock">{getIngredientStatusLabel('in_stock', language)}</option>
+                        <option value="ordered">{getIngredientStatusLabel('ordered', language)}</option>
+                        <option value="wishlist">{getIngredientStatusLabel('wishlist', language)}</option>
+                      </select>
+                      <ChevronDown className="pointer-events-none absolute right-1.5 top-1/2 -translate-y-1/2 h-3 w-3 opacity-60" />
+                    </div>
+
+                    {/* 5. Actions & Details Toggle Button */}
+                    <div className="flex items-center gap-1">
+                      {ing.status !== 'in_stock' && (
+                        <button
+                          type="button"
+                          onClick={() => handleMarkAsPurchased(ing)}
+                          className="inline-flex items-center gap-1 rounded-md border border-emerald-300 bg-emerald-50 px-2 py-1 text-[11px] font-medium text-emerald-700 hover:bg-emerald-100 transition-colors"
+                          title={t.boughtTitle}
+                        >
+                          <Check className="h-3 w-3" />
+                          <span className="hidden sm:inline">{t.boughtBtn}</span>
+                        </button>
+                      )}
+
+                      {projects.length > 0 && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setEstimateTargetIng(ing);
+                            setEstimateProjectId(projects[0].id);
+                            setEstimateQty(String(ing.quantityGrams || 10));
+                          }}
+                          className="rounded-md p-1.5 text-[#575955] hover:bg-[#F1F1EE] hover:text-[#181917] transition-colors"
+                          title={t.addToEstimateTitle}
+                          aria-label={t.addToEstimateAria(ing.name)}
+                        >
+                          <ShoppingCart className="h-3.5 w-3.5" />
+                        </button>
+                      )}
+
+                      <button
+                        type="button"
+                        onClick={() => openEditModal(ing)}
+                        className="rounded-md p-1.5 text-[#575955] hover:bg-[#F1F1EE] hover:text-[#181917] transition-colors"
+                        title={t.editTitle}
+                        aria-label={t.editAria(ing.name)}
+                      >
+                        <Edit3 className="h-3.5 w-3.5" />
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => onDeleteIngredient(ing.id)}
+                        className="rounded-md p-1.5 text-[#787A74] hover:bg-red-50 hover:text-red-700 transition-colors"
+                        title={t.deleteTitle}
+                        aria-label={t.deleteAria(ing.name)}
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </button>
+
+                      {/* Дополнительно / Скрыть button */}
+                      <button
+                        type="button"
+                        onClick={() => toggleExpandIngredient(ing.id)}
+                        className={`inline-flex items-center gap-1 rounded-md border px-2 py-1 text-xs font-medium transition-colors ${
+                          isExpanded
+                            ? 'border-[var(--theme-accent)] bg-[var(--theme-accent-soft)] text-[var(--theme-accent)]'
+                            : 'border-[#E4E4E0] bg-[#FAF9F8] text-[#4B4D48] hover:bg-[#EAEAE6]'
+                        }`}
+                        title={isExpanded ? t.hideDetailsBtn : t.detailsBtn}
+                      >
+                        <span>{isExpanded ? t.hideDetailsBtn : t.detailsBtn}</span>
+                        {isExpanded ? (
+                          <ChevronUp className="h-3.5 w-3.5" />
+                        ) : (
+                          <ChevronDown className="h-3.5 w-3.5" />
+                        )}
+                      </button>
                     </div>
                   </div>
+                </div>
 
-                  {/* Store Name + Purchase URL (Paste & Copy) */}
-                  {viewSettings.showIngredientPurchaseBar && (
-                    <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between border-t border-[#EAEAE6] pt-2.5">
+                {/* Expanded Accordion: «Дополнительно» */}
+                {isExpanded && (
+                  <div className="border-t border-[#EAEAE6] bg-[#FAF9F8] px-4 py-3.5 text-xs space-y-3">
+                    {/* Row 1: Scent Profile & Bottle Label editable input */}
+                    <div className="flex flex-col gap-2.5 sm:flex-row sm:items-start sm:justify-between">
+                      <div className="flex-1 min-w-0 pr-2">
+                        <span className="font-semibold text-[#575955]">{t.scentProfileLabel}</span>
+                        <span className="text-[#181917] leading-relaxed ml-1">
+                          {ing.olfactoryNotes || <span className="text-[#8B8D87] italic">{t.noDescriptionYet}</span>}
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-2 shrink-0 bg-white border border-[#E4E4E0] rounded-lg px-2.5 py-1 shadow-2xs">
+                        <span className="text-[#605E5C] font-medium whitespace-nowrap text-[11px]">
+                          🏷️ {t.bottleLabelInputLabel}
+                        </span>
+                        <input
+                          type="text"
+                          value={ing.bottleLabel || ''}
+                          onChange={(e) => onUpdateIngredient({ ...ing, bottleLabel: e.target.value })}
+                          placeholder={t.bottleLabelPlaceholder}
+                          className="w-48 sm:w-56 text-xs text-[#181917] placeholder:text-[#8B8D87] focus:outline-none"
+                        />
+                      </div>
+                    </div>
+
+                    {/* Row 2: Secondary Specs Grid */}
+                    <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2.5 pt-2 border-t border-[#EAEAE6]">
+                      <div className="rounded-lg bg-white border border-[#EAEAE6] p-2">
+                        <div className="text-[10px] text-[#787A74] uppercase tracking-wider">{t.colFamilyTier}</div>
+                        <div className="font-medium text-[#181917] mt-0.5 truncate">
+                          {getOlfactoryFamilyLabel(ing.family, language)} · {getNoteTierLabel(ing.tier, language)}
+                        </div>
+                      </div>
+
+                      <div className="rounded-lg bg-white border border-[#EAEAE6] p-2">
+                        <div className="text-[10px] text-[#787A74] uppercase tracking-wider">{t.colLongevitySillage}</div>
+                        <div className="font-medium text-[#181917] mt-0.5 truncate">
+                          {ing.longevityLabel || '—'} · {getSillageLabel(ing.sillage, language).split(' ')[0]}
+                        </div>
+                      </div>
+
+                      <div className="rounded-lg bg-white border border-[#EAEAE6] p-2">
+                        <div className="text-[10px] text-[#787A74] uppercase tracking-wider">{t.colMaxPct} (IFRA 51)</div>
+                        <div className="font-medium font-mono text-[#181917] mt-0.5">
+                          {(() => {
+                            const ifraStd = resolveIfraStandard(ing);
+                            const displayLimit =
+                              ifraStd !== undefined
+                                ? ifraStd.category4LimitPercent
+                                : ing.ifraLimitPercent;
+
+                            if (
+                              ifraStd?.status === 'prohibited' ||
+                              ifraStd?.status === 'eu_banned' ||
+                              displayLimit === 0
+                            ) {
+                              return <span className="font-semibold text-[#B91C1C]">0% (Ban)</span>;
+                            }
+                            if (ifraStd?.status === 'exempt_fcf') {
+                              return <span className="font-medium text-[#15803D]">FCF</span>;
+                            }
+                            if (displayLimit !== undefined) {
+                              return <span>{displayLimit}%</span>;
+                            }
+                            if (ifraStd?.status === 'unrestricted') {
+                              return <span className="text-[#15803D]">Свободно</span>;
+                            }
+                            return '—';
+                          })()}
+                        </div>
+                      </div>
+
+                      <div className="rounded-lg bg-white border border-[#EAEAE6] p-2">
+                        <div className="text-[10px] text-[#787A74] uppercase tracking-wider">{t.colStorage}</div>
+                        <div className="font-medium text-[#181917] mt-0.5 truncate flex items-center gap-1">
+                          <MapPin className="h-3 w-3 text-[#787A74] shrink-0" />
+                          <span>{ing.storageLocation || '—'}</span>
+                        </div>
+                      </div>
+
+                      <div className="rounded-lg bg-white border border-[#EAEAE6] p-2">
+                        <div className="text-[10px] text-[#787A74] uppercase tracking-wider">{t.colStorePurchased}</div>
+                        <div className="font-medium text-[#181917] mt-0.5 truncate">
+                          {ing.supplier || t.storeNotSet}
+                        </div>
+                      </div>
+
+                      <div className="rounded-lg bg-white border border-[#EAEAE6] p-2">
+                        <div className="text-[10px] text-[#787A74] uppercase tracking-wider">{t.lastPurchaseDateLabel}</div>
+                        <div className="font-medium font-mono text-[#181917] mt-0.5">
+                          {ing.purchaseDate || t.notPurchased}
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Row 3: Store & Purchase URL */}
+                    <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between pt-2 border-t border-[#EAEAE6]">
                       <div className="flex items-center gap-2 text-xs text-[#323130] shrink-0">
                         <Store className="h-3.5 w-3.5 text-[#605E5C]" />
-                        <span className="text-[#605E5C]">{t.storeColon}</span>
+                        <span className="text-[#605E5C] font-medium">{t.storeColon}</span>
                         <input
                           type="text"
                           value={ing.supplier || ''}
                           onChange={(e) => onUpdateIngredient({ ...ing, supplier: e.target.value })}
                           placeholder={t.storeNamePlaceholder}
                           aria-label={t.storeForAria(ing.name)}
-                          className="w-44 rounded border border-[#E4E4E0] bg-white px-2.5 py-1 text-xs text-[#181917] focus:border-[var(--theme-accent)] focus:outline-none"
+                          className="w-40 sm:w-48 rounded border border-[#E4E4E0] bg-white px-2.5 py-1 text-xs text-[#181917] focus:border-[var(--theme-accent)] focus:outline-none"
                         />
                       </div>
 
                       <div className="flex flex-1 items-center gap-1.5 min-w-0">
-                        <span className="text-xs text-[#605E5C] shrink-0">{t.urlColon}</span>
+                        <span className="text-xs text-[#605E5C] shrink-0 font-medium">{t.urlColon}</span>
                         <input
                           type="url"
                           value={ing.purchaseUrl || ''}
@@ -2000,7 +2113,7 @@ export function IngredientsCatalog({
                         <button
                           type="button"
                           onClick={() => handlePasteUrlToRow(ing)}
-                          className="inline-flex items-center gap-1 rounded border border-[#E4E4E0] bg-white px-2.5 py-1 text-[11px] font-medium text-[#323130] hover:bg-[#F3F2F1] whitespace-nowrap shrink-0"
+                          className="inline-flex items-center gap-1 rounded border border-[#E4E4E0] bg-white px-2 py-1 text-[11px] font-medium text-[#323130] hover:bg-[#F3F2F1] whitespace-nowrap shrink-0"
                           title={t.pasteUrlTitle}
                         >
                           <ClipboardPaste className="h-3 w-3 text-[var(--theme-accent)]" />
@@ -2010,16 +2123,103 @@ export function IngredientsCatalog({
                           type="button"
                           disabled={!ing.purchaseUrl?.trim()}
                           onClick={() => handleCopyUrl(ing.purchaseUrl || '', ing.id)}
-                          className="inline-flex items-center gap-1 rounded border border-[#E4E4E0] bg-white px-2.5 py-1 text-[11px] font-medium text-[#323130] hover:bg-[#F3F2F1] disabled:opacity-40 whitespace-nowrap shrink-0"
+                          className="inline-flex items-center gap-1 rounded border border-[#E4E4E0] bg-white px-2 py-1 text-[11px] font-medium text-[#323130] hover:bg-[#F3F2F1] disabled:opacity-40 whitespace-nowrap shrink-0"
                           title={t.copyUrlTitle}
                         >
                           <ClipboardCopy className="h-3 w-3 text-[#605E5C]" />
                           <span>{copiedId === ing.id ? t.copiedBtn : t.copyBtn}</span>
                         </button>
+                        {ing.purchaseUrl?.trim() && (
+                          <a
+                            href={ing.purchaseUrl}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="inline-flex items-center gap-1 rounded border border-[#E4E4E0] bg-white px-2 py-1 text-[11px] font-medium text-[var(--theme-accent)] hover:bg-[#F3F2F1] whitespace-nowrap shrink-0"
+                            title={t.openUrlTitle}
+                          >
+                            <ExternalLink className="h-3 w-3" />
+                          </a>
+                        )}
                       </div>
                     </div>
-                  )}
-                </div>
+
+                    {/* Row 4: Tags bar */}
+                    <div className="flex flex-wrap items-center justify-between gap-2 pt-2 border-t border-[#EAEAE6]">
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <Tag className="h-3 w-3 text-[var(--theme-accent)] shrink-0" />
+                        <span className="text-[11px] font-medium text-[#605E5C]">{t.cardTagAssignLabel}</span>
+                        {(ing.tags || []).map((tag) => (
+                          <span
+                            key={tag}
+                            className="inline-flex items-center gap-1 rounded-md bg-white border border-[#E4E4E0] px-2 py-0.5 text-[11px] text-[#4B4D48]"
+                          >
+                            #{tag}
+                          </span>
+                        ))}
+                      </div>
+
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setCardTagDraft('');
+                          setTagPickerIngId((prev) => (prev === ing.id ? null : ing.id));
+                        }}
+                        className="inline-flex items-center gap-1 rounded-md border border-[#E4E4E0] bg-white px-2.5 py-1 text-[11px] font-medium text-[#4B4D48] hover:bg-[#F3F2F1] transition-colors"
+                      >
+                        <Tag className="h-3 w-3 text-[var(--theme-accent)]" />
+                        <span>{tagPickerIngId === ing.id ? t.closeFormAria : t.cardTagsBtn}</span>
+                      </button>
+                    </div>
+
+                    {/* Inline Card Tag Picker if open */}
+                    {tagPickerIngId === ing.id && (
+                      <div className="rounded-lg border border-[#EAEAE6] bg-white p-3 space-y-2 mt-2">
+                        <form
+                          onSubmit={(e) => handleAddCardTagSubmit(e, ing)}
+                          className="flex items-center gap-1.5"
+                        >
+                          <input
+                            type="text"
+                            value={cardTagDraft}
+                            onChange={(e) => setCardTagDraft(e.target.value)}
+                            placeholder={t.cardTagInputPlaceholder}
+                            className="w-48 rounded border border-[#E4E4E0] bg-white px-2.5 py-1 text-xs text-[#181917] focus:border-[var(--theme-accent)] focus:outline-none"
+                          />
+                          <button
+                            type="submit"
+                            disabled={!cardTagDraft.trim()}
+                            className="inline-flex items-center gap-1 rounded border border-[#E4E4E0] bg-white px-2.5 py-1 text-[11px] font-medium text-[#181917] hover:bg-[#F3F2F1] disabled:opacity-40"
+                          >
+                            <Plus className="h-3 w-3 text-[var(--theme-accent)]" />
+                            <span>{t.modalTagAddBtn}</span>
+                          </button>
+                        </form>
+                        <div className="flex flex-wrap items-center gap-1.5 pt-1">
+                          {Array.from(new Set([...mergedTags, ...(ing.tags || [])])).map((tag) => {
+                            const assigned = (ing.tags || []).some(
+                              (tg) => tg.toLowerCase() === tag.toLowerCase()
+                            );
+                            return (
+                              <button
+                                key={tag}
+                                type="button"
+                                onClick={() => handleToggleTagOnIngredient(ing, tag)}
+                                className={`inline-flex items-center gap-1 rounded-md border px-2 py-0.5 text-[11px] font-medium transition-colors ${
+                                  assigned
+                                    ? 'border-[var(--theme-accent)] bg-[var(--theme-accent-soft)] text-[var(--theme-accent)]'
+                                    : 'border-[#E4E4E0] bg-white text-[#575955] hover:text-[#181917]'
+                                }`}
+                              >
+                                {assigned && <Check className="h-3 w-3 shrink-0" />}
+                                <span>#{tag}</span>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
               </article>
             );
           })}
@@ -2173,6 +2373,13 @@ export function IngredientsCatalog({
                             key={item.id}
                             type="button"
                             onClick={() => {
+                              const resolvedStd = resolveIfraStandard({
+                                name: item.name,
+                                inciOrCas: item.inciOrCas,
+                              });
+                              const resolvedIfraLimit = resolvedStd
+                                ? resolvedStd.category4LimitPercent
+                                : item.ifraLimitPercent;
                               setForm((prev) => ({
                                 ...prev,
                                 name: item.name,
@@ -2180,6 +2387,7 @@ export function IngredientsCatalog({
                                 family: item.family,
                                 tier: item.tier,
                                 origin: item.origin,
+                                ifraLimitPercent: resolvedIfraLimit,
                                 longevityLabel: item.blotterLongevity || prev.longevityLabel,
                                 olfactoryNotes:
                                   item.scentDescription || item.properties || prev.olfactoryNotes,
@@ -2430,7 +2638,7 @@ export function IngredientsCatalog({
                     type="number"
                     min={0}
                     max={100}
-                    step="0.01"
+                    step="0.001"
                     value={form.ifraLimitPercent ?? ''}
                     onChange={(e) =>
                       setForm({

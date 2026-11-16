@@ -1,6 +1,9 @@
 import {
+  Activity,
   BookOpen,
+  Check,
   Clock,
+  Flame,
   Lightbulb,
   NotebookPen,
   Pencil,
@@ -13,6 +16,7 @@ import {
 } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import {
+  FAMILY_HEX_MAP,
   getIngredientOriginLabel,
   getNoteTierShort,
   getOlfactoryFamilyLabel,
@@ -20,7 +24,14 @@ import {
   NOTE_TIER_LABELS,
   OLFACTORY_FAMILIES,
 } from '../data/constants';
+import {
+  FRATERWORKS_REFERENCE_MATERIALS,
+  getLocalizedFacetName,
+  getLocalizedVolatilityLabel,
+  getMaterialScentPassport,
+} from '../data/fraterworksProfiles';
 import { tr } from '../data/i18n';
+import { resolveIfraStandard } from '../data/ifraStandards';
 import type {
   AppLanguage,
   Ingredient,
@@ -29,21 +40,42 @@ import type {
   LibraryNote,
   NoteTier,
   OlfactoryFamilyKey,
+  PerfumeProject,
+  ScentFacetBreakdown,
 } from '../types/perfume';
 import { generateId, todayIsoDate } from '../utils/storage';
 
 interface IngredientLibraryProps {
   library: LibraryIngredient[];
   studioIngredients: Ingredient[];
+  projects?: PerfumeProject[];
+  selectedProjectId?: string | null;
   language: AppLanguage;
   onAddLibraryItem: (item: LibraryIngredient) => void;
   onUpdateLibraryItem: (item: LibraryIngredient) => void;
   onDeleteLibraryItem: (id: string) => void;
   onAddToStudioWishlist: (item: LibraryIngredient) => void;
+  onAddToProjectFormula?: (
+    item: LibraryIngredient,
+    projectId: string,
+    weightGrams: number
+  ) => void;
 }
 
-type LibrarySortBy = 'updated' | 'scent_desc' | 'ideas_desc' | 'name_asc';
+type LibrarySortBy =
+  | 'updated'
+  | 'scent_desc'
+  | 'ideas_desc'
+  | 'impact_desc'
+  | 'substantivity_desc'
+  | 'name_asc';
 type LibraryRatingFilter = 'all' | 'scent_8' | 'ideas_8';
+type LibraryImpactFilter =
+  | 'all'
+  | 'high_impact'
+  | 'ultra_booster'
+  | 'blender'
+  | 'fixative';
 
 const BLOTTER_PRESETS: Record<AppLanguage, string[]> = {
   ru: ['1–2 часа', '6–8 часов', '24 часа', '48+ часов', '5–7 дней'],
@@ -106,11 +138,14 @@ function RatingScaleInput({
 export function IngredientLibrary({
   library,
   studioIngredients,
+  projects = [],
+  selectedProjectId = null,
   language,
   onAddLibraryItem,
   onUpdateLibraryItem,
   onDeleteLibraryItem,
   onAddToStudioWishlist,
+  onAddToProjectFormula,
 }: IngredientLibraryProps) {
   // Filters & search
   const [searchQuery, setSearchQuery] = useState('');
@@ -118,12 +153,20 @@ export function IngredientLibrary({
   const [familyFilter, setFamilyFilter] = useState<'all' | OlfactoryFamilyKey>('all');
   const [originFilter, setOriginFilter] = useState<'all' | IngredientOrigin>('all');
   const [ratingFilter, setRatingFilter] = useState<LibraryRatingFilter>('all');
+  const [impactFilter, setImpactFilter] = useState<LibraryImpactFilter>('all');
   const [sortBy, setSortBy] = useState<LibrarySortBy>('updated');
   const [visibleCount, setVisibleCount] = useState<number>(40);
 
   // Selection & editor state
   const [selectedId, setSelectedId] = useState<string | null>(library[0]?.id || null);
   const [formMode, setFormMode] = useState<'closed' | 'create' | 'edit'>('closed');
+
+  // Formula quick-add state inside Library Inspector
+  const [targetProjectId, setTargetProjectId] = useState<string>(
+    selectedProjectId || projects[0]?.id || ''
+  );
+  const [addWeight, setAddWeight] = useState('0.50');
+  const [addedFeedback, setAddedFeedback] = useState(false);
 
   // Form fields
   const [formName, setFormName] = useState('');
@@ -132,6 +175,13 @@ export function IngredientLibrary({
   const [formTier, setFormTier] = useState<NoteTier>('heart');
   const [formOrigin, setFormOrigin] = useState<IngredientOrigin>('natural');
   const [formBlotterLongevity, setFormBlotterLongevity] = useState('');
+  const [formOdorImpact, setFormOdorImpact] = useState('100');
+  const [formSubstantivityHours, setFormSubstantivityHours] = useState('48');
+  const [formAverageUse, setFormAverageUse] = useState('1% – 15%');
+  const [formFacets, setFormFacets] = useState<ScentFacetBreakdown[]>([
+    { facet: 'Primary Accord', family: 'citrus', percent: 75 },
+    { facet: 'Secondary Nuance', family: 'green', percent: 25 },
+  ]);
   const [formProperties, setFormProperties] = useState('');
   const [formScentDesc, setFormScentDesc] = useState('');
   const [formScentRating, setFormScentRating] = useState(8);
@@ -145,8 +195,33 @@ export function IngredientLibrary({
   const [editingNoteText, setEditingNoteText] = useState('');
 
   useEffect(() => {
+    if (selectedProjectId) {
+      setTargetProjectId(selectedProjectId);
+    } else if (!targetProjectId && projects[0]?.id) {
+      setTargetProjectId(projects[0].id);
+    }
+  }, [selectedProjectId, projects, targetProjectId]);
+
+  useEffect(() => {
     setVisibleCount(40);
-  }, [searchQuery, tierFilter, familyFilter, originFilter, ratingFilter, sortBy]);
+  }, [
+    searchQuery,
+    tierFilter,
+    familyFilter,
+    originFilter,
+    ratingFilter,
+    impactFilter,
+    sortBy,
+  ]);
+
+  // Pre-compute Fraterworks passports for all library items
+  const passportById = useMemo(() => {
+    const map = new Map<string, ReturnType<typeof getMaterialScentPassport>>();
+    for (const item of library) {
+      map.set(item.id, getMaterialScentPassport(item));
+    }
+    return map;
+  }, [library]);
 
   const filteredLibrary = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
@@ -156,6 +231,13 @@ export function IngredientLibrary({
       if (originFilter !== 'all' && item.origin !== originFilter) return false;
       if (ratingFilter === 'scent_8' && item.scentRating < 8) return false;
       if (ratingFilter === 'ideas_8' && item.futureIdeasRating < 8) return false;
+
+      const passport = passportById.get(item.id) || getMaterialScentPassport(item);
+      if (impactFilter === 'high_impact' && passport.odorImpact < 200) return false;
+      if (impactFilter === 'ultra_booster' && passport.odorImpact < 450) return false;
+      if (impactFilter === 'blender' && passport.odorImpact > 85) return false;
+      if (impactFilter === 'fixative' && passport.substantivityHours < 168) return false;
+
       if (q) {
         const hay = [
           item.name,
@@ -163,6 +245,8 @@ export function IngredientLibrary({
           item.blotterLongevity || '',
           item.properties,
           item.scentDescription,
+          ...passport.synonyms,
+          ...passport.scentBreakdown.map((f) => f.facet),
           ...item.notes.map((n) => n.text),
         ]
           .join(' ')
@@ -173,13 +257,34 @@ export function IngredientLibrary({
     });
 
     return [...list].sort((a, b) => {
-      if (sortBy === 'scent_desc') return b.scentRating - a.scentRating || a.name.localeCompare(b.name);
+      if (sortBy === 'scent_desc')
+        return b.scentRating - a.scentRating || a.name.localeCompare(b.name);
       if (sortBy === 'ideas_desc')
         return b.futureIdeasRating - a.futureIdeasRating || a.name.localeCompare(b.name);
+      if (sortBy === 'impact_desc') {
+        const pA = passportById.get(a.id)?.odorImpact || 100;
+        const pB = passportById.get(b.id)?.odorImpact || 100;
+        return pB - pA || a.name.localeCompare(b.name);
+      }
+      if (sortBy === 'substantivity_desc') {
+        const sA = passportById.get(a.id)?.substantivityHours || 12;
+        const sB = passportById.get(b.id)?.substantivityHours || 12;
+        return sB - sA || a.name.localeCompare(b.name);
+      }
       if (sortBy === 'name_asc') return a.name.localeCompare(b.name);
       return b.updatedAt.localeCompare(a.updatedAt);
     });
-  }, [library, searchQuery, tierFilter, familyFilter, originFilter, ratingFilter, sortBy]);
+  }, [
+    library,
+    passportById,
+    searchQuery,
+    tierFilter,
+    familyFilter,
+    originFilter,
+    ratingFilter,
+    impactFilter,
+    sortBy,
+  ]);
 
   const visibleLibrary = useMemo(
     () => filteredLibrary.slice(0, visibleCount),
@@ -196,14 +301,24 @@ export function IngredientLibrary({
     [library, selectedId]
   );
 
+  const selectedPassport = useMemo(
+    () =>
+      selectedItem
+        ? passportById.get(selectedItem.id) || getMaterialScentPassport(selectedItem)
+        : null,
+    [selectedItem, passportById]
+  );
+
   const stats = useMemo(() => {
     const count = library.length;
     const avgScent =
       count > 0 ? library.reduce((s, i) => s + i.scentRating, 0) / count : 0;
     const highIdeasCount = library.filter((i) => i.futureIdeasRating >= 8).length;
-    const totalNotes = library.reduce((s, i) => s + i.notes.length, 0);
-    return { count, avgScent, highIdeasCount, totalNotes };
-  }, [library]);
+    const highImpactCount = library.filter(
+      (i) => (passportById.get(i.id)?.odorImpact || 100) >= 200
+    ).length;
+    return { count, avgScent, highIdeasCount, highImpactCount };
+  }, [library, passportById]);
 
   const studioNamesLower = useMemo(
     () => new Set(studioIngredients.map((i) => i.name.trim().toLowerCase())),
@@ -218,6 +333,13 @@ export function IngredientLibrary({
     setFormTier('heart');
     setFormOrigin('natural');
     setFormBlotterLongevity('');
+    setFormOdorImpact('100');
+    setFormSubstantivityHours('48');
+    setFormAverageUse('1% – 15%');
+    setFormFacets([
+      { facet: 'Primary Citrus / Floral', family: 'citrus', percent: 75 },
+      { facet: 'Secondary Nuance', family: 'green', percent: 25 },
+    ]);
     setFormProperties('');
     setFormScentDesc('');
     setFormScentRating(8);
@@ -226,13 +348,24 @@ export function IngredientLibrary({
   };
 
   const openEditForm = (item: LibraryIngredient) => {
+    const p = passportById.get(item.id) || getMaterialScentPassport(item);
     setFormMode('edit');
     setFormName(item.name);
-    setFormCas(item.inciOrCas || '');
+    setFormCas(item.inciOrCas || p.inciOrCas || '');
     setFormFamily(item.family);
     setFormTier(item.tier);
     setFormOrigin(item.origin);
-    setFormBlotterLongevity(item.blotterLongevity || '');
+    setFormBlotterLongevity(item.blotterLongevity || `${p.substantivityHours} ч`);
+    setFormOdorImpact(String(p.odorImpact));
+    setFormSubstantivityHours(String(p.substantivityHours));
+    setFormAverageUse(p.averageUsePercent);
+    setFormFacets(
+      p.scentBreakdown.map((f) => ({
+        facet: f.facet,
+        family: f.family,
+        percent: f.percent,
+      }))
+    );
     setFormProperties(item.properties);
     setFormScentDesc(item.scentDescription);
     setFormScentRating(item.scentRating);
@@ -243,26 +376,68 @@ export function IngredientLibrary({
   const handlePrefillFromStudio = (ingId: string) => {
     const ing = studioIngredients.find((i) => i.id === ingId);
     if (!ing) return;
+    const p = getMaterialScentPassport(ing);
     setFormName(ing.name);
     setFormCas(ing.inciOrCas || '');
     setFormFamily(ing.family);
     setFormTier(ing.tier);
     setFormOrigin(ing.origin);
-    setFormBlotterLongevity(ing.longevityLabel && ing.longevityLabel !== '—' ? ing.longevityLabel : '');
+    setFormBlotterLongevity(
+      ing.longevityLabel && ing.longevityLabel !== '—' ? ing.longevityLabel : `${p.substantivityHours} ч`
+    );
+    setFormOdorImpact(String(p.odorImpact));
+    setFormSubstantivityHours(String(p.substantivityHours));
+    setFormAverageUse(p.averageUsePercent);
+    setFormFacets(p.scentBreakdown);
     const propsParts = [
-      ing.ifraLimitPercent !== undefined
-        ? `IFRA: ${ing.ifraLimitPercent}%`
-        : '',
+      ing.ifraLimitPercent !== undefined ? `IFRA: ${ing.ifraLimitPercent}%` : '',
       ing.solventNote || '',
     ].filter(Boolean);
     setFormProperties(propsParts.join('. '));
     setFormScentDesc(ing.olfactoryNotes || '');
   };
 
+  const handlePrefillFromFraterworks = (fwId: string) => {
+    const fw = FRATERWORKS_REFERENCE_MATERIALS.find((f) => f.id === fwId);
+    if (!fw) return;
+    const ifraStd = resolveIfraStandard({
+      name: fw.name,
+      inciOrCas: fw.inciOrCas,
+    });
+    const ifraSummary = ifraStd
+      ? ifraStd.category4LimitPercent !== undefined
+        ? ` IFRA 51 Cat. 4: до ${ifraStd.category4LimitPercent}%.`
+        : ifraStd.status === 'exempt_fcf'
+          ? ' IFRA 51 Cat. 4: FCF (не ограничен).'
+          : ' IFRA 51 Cat. 4: не ограничен.'
+      : fw.ifraLimitPercent !== undefined
+        ? ` IFRA 51 Cat. 4: до ${fw.ifraLimitPercent}%.`
+        : '';
+    setFormName(fw.name);
+    setFormCas(fw.inciOrCas || '');
+    setFormFamily(fw.family);
+    setFormTier(fw.tier);
+    setFormOrigin(fw.origin);
+    setFormBlotterLongevity(`${fw.substantivityHours} ч`);
+    setFormOdorImpact(String(fw.odorImpact));
+    setFormSubstantivityHours(String(fw.substantivityHours));
+    setFormAverageUse(fw.averageUsePercent);
+    setFormFacets(fw.scentBreakdown.map((b) => ({ ...b })));
+    setFormProperties(`Летучесть: ${fw.volatilityLabel}.${ifraSummary}`);
+    setFormScentDesc(fw.scentDescription);
+  };
+
   const handleSubmitForm = (e: React.FormEvent) => {
     e.preventDefault();
     if (!formName.trim()) return;
     const today = todayIsoDate();
+    const cleanFacets = formFacets
+      .filter((f) => f.facet.trim().length > 0 && f.percent > 0)
+      .map((f) => ({
+        facet: f.facet.trim(),
+        family: f.family,
+        percent: Math.max(1, Math.min(100, Math.round(Number(f.percent) || 10))),
+      }));
 
     if (formMode === 'edit' && selectedItem) {
       const updated: LibraryIngredient = {
@@ -273,6 +448,13 @@ export function IngredientLibrary({
         tier: formTier,
         origin: formOrigin,
         blotterLongevity: formBlotterLongevity.trim() || undefined,
+        odorImpact: Math.max(10, Math.min(1000, Math.round(Number(formOdorImpact) || 100))),
+        substantivityHours: Math.max(
+          1,
+          Math.min(400, Math.round(Number(formSubstantivityHours) || 24))
+        ),
+        averageUsePercent: formAverageUse.trim() || undefined,
+        scentBreakdown: cleanFacets.length > 0 ? cleanFacets : undefined,
         properties: formProperties.trim(),
         scentDescription: formScentDesc.trim(),
         scentRating: formScentRating,
@@ -297,6 +479,13 @@ export function IngredientLibrary({
       tier: formTier,
       origin: formOrigin,
       blotterLongevity: formBlotterLongevity.trim() || undefined,
+      odorImpact: Math.max(10, Math.min(1000, Math.round(Number(formOdorImpact) || 100))),
+      substantivityHours: Math.max(
+        1,
+        Math.min(400, Math.round(Number(formSubstantivityHours) || 24))
+      ),
+      averageUsePercent: formAverageUse.trim() || undefined,
+      scentBreakdown: cleanFacets.length > 0 ? cleanFacets : undefined,
       properties: formProperties.trim(),
       scentDescription: formScentDesc.trim(),
       scentRating: formScentRating,
@@ -348,6 +537,8 @@ export function IngredientLibrary({
     });
   };
 
+  const gUnit = language === 'ru' ? 'г' : 'g';
+
   return (
     <div className="space-y-6">
       {/* Header */}
@@ -355,20 +546,20 @@ export function IngredientLibrary({
         <div>
           <h1 className="text-2xl sm:text-3xl font-bold text-[#181917]">
             {tr(language, {
-              ru: 'Библиотека ингредиентов',
-              en: 'Ingredient Library',
-              it: 'Libreria Ingredienti',
-              es: 'Biblioteca de Ingredientes',
-              de: 'Rohstoff-Bibliothek',
+              ru: 'Библиотека ингредиентов и паспорта Fraterworks',
+              en: 'Ingredient Library & Fraterworks Scent Passports',
+              it: 'Libreria Ingredienti e Passaporti Fraterworks',
+              es: 'Biblioteca de Ingredientes y Pasaportes Fraterworks',
+              de: 'Rohstoff-Bibliothek & Fraterworks-Passports',
             })}
           </h1>
-          <p className="mt-1 text-sm text-[#605E5C] max-w-2xl">
+          <p className="mt-1 text-sm text-[#605E5C] max-w-3xl">
             {tr(language, {
-              ru: 'Личный справочник известных душистых веществ и масел: свойства, чем пахнет, две оценки (как пахнет и потенциал для будущих идей) и ваши заметки.',
-              en: 'Personal reference database of known aroma materials: physical properties, scent impressions, dual ratings (scent & future ideas), and study notes.',
-              it: 'Archivio personale delle materie aromatiche conosciute: proprietà fisiche, impressioni olfattive, doppia valutazione (odore e idee future) e note di studio.',
-              es: 'Referencia personal de materias aromáticas conocidas: propiedades físicas, perfil olfativo, doble valoración (aroma e ideas futuras) y notas propias.',
-              de: 'Persönliches Nachschlagewerk bekannter Duftstoffe: Eigenschaften, Geruchsprofil, zwei Bewertungen (Duft & Potenzial für Ideen) sowie Studiennotizen.',
+              ru: 'Энциклопедия парфюмерных веществ со шкалой Scent Breakdown (разбор граней аромата), относительной силой звучания (Odor Impact), летучестью и вашими личными заметками.',
+              en: 'Comprehensive perfumery material reference with Fraterworks-style Scent Breakdown bars, Odor Impact strength, volatility hours, ratings, and personal lab notes.',
+              it: 'Enciclopedia delle materie prime con barre Scent Breakdown in stile Fraterworks, Odor Impact, volatilità, valutazioni e note personali.',
+              es: 'Enciclopedia de materiales con barras Scent Breakdown al estilo Fraterworks, fuerza (Odor Impact), volatilidad, valoraciones y notas.',
+              de: 'Umfassendes Nachschlagewerk mit Fraterworks Scent Breakdown, Duftstärke (Odor Impact), Flüchtigkeit, Bewertungen und Labornotizen.',
             })}
           </p>
         </div>
@@ -380,8 +571,8 @@ export function IngredientLibrary({
           <Plus className="h-4 w-4" />
           <span>
             {tr(language, {
-              ru: 'Добавить ингредиент',
-              en: 'Add Known Ingredient',
+              ru: 'Добавить вещество',
+              en: 'Add Material',
               it: 'Aggiungi Ingrediente',
               es: 'Añadir Ingrediente',
               de: 'Rohstoff hinzufügen',
@@ -395,15 +586,29 @@ export function IngredientLibrary({
         <div className="rounded-xl border border-[#E1DFDD] bg-white p-4">
           <div className="text-xs text-[#605E5C]">
             {tr(language, {
-              ru: 'Ингредиентов в библиотеке',
-              en: 'Known Materials',
-              it: 'Materie conosciute',
-              es: 'Materias conocidas',
-              de: 'Bekannte Rohstoffe',
+              ru: 'Веществ в энциклопедии',
+              en: 'Materials in Library',
+              it: 'Materie in libreria',
+              es: 'Materias en biblioteca',
+              de: 'Rohstoffe in Bibliothek',
             })}
           </div>
           <div className="mt-1 font-mono text-2xl font-bold tabular-nums text-[#181917]">
             {stats.count}
+          </div>
+        </div>
+        <div className="rounded-xl border border-[#E1DFDD] bg-white p-4">
+          <div className="text-xs text-[#605E5C]">
+            {tr(language, {
+              ru: 'Высокий импакт (Impact ≥ 200)',
+              en: 'High Impact (≥ 200)',
+              it: 'Alto Impatto (≥ 200)',
+              es: 'Alto Impacto (≥ 200)',
+              de: 'Hoher Impact (≥ 200)',
+            })}
+          </div>
+          <div className="mt-1 font-mono text-2xl font-bold tabular-nums text-[#D97706]">
+            {stats.highImpactCount}
           </div>
         </div>
         <div className="rounded-xl border border-[#E1DFDD] bg-white p-4">
@@ -435,20 +640,6 @@ export function IngredientLibrary({
             {stats.highIdeasCount}
           </div>
         </div>
-        <div className="rounded-xl border border-[#E1DFDD] bg-white p-4">
-          <div className="text-xs text-[#605E5C]">
-            {tr(language, {
-              ru: 'Всего заметок',
-              en: 'Personal Notes',
-              it: 'Note personali',
-              es: 'Notas personales',
-              de: 'Eigene Notizen',
-            })}
-          </div>
-          <div className="mt-1 font-mono text-2xl font-bold tabular-nums text-[#181917]">
-            {stats.totalNotes}
-          </div>
-        </div>
       </div>
 
       {/* Create / Edit Form Panel */}
@@ -463,45 +654,61 @@ export function IngredientLibrary({
               <h2 className="text-base font-semibold text-[#181917]">
                 {formMode === 'edit'
                   ? tr(language, {
-                      ru: 'Редактирование ингредиента',
-                      en: 'Edit Library Ingredient',
-                      it: 'Modifica Ingrediente',
-                      es: 'Editar Ingrediente',
-                      de: 'Rohstoff bearbeiten',
+                      ru: 'Редактирование паспорта вещества',
+                      en: 'Edit Material & Scent Passport',
+                      it: 'Modifica Passaporto Ingrediente',
+                      es: 'Editar Pasaporte del Material',
+                      de: 'Rohstoff-Passport bearbeiten',
                     })
                   : tr(language, {
-                      ru: 'Новый известный ингредиент',
-                      en: 'New Library Ingredient',
+                      ru: 'Новое вещество в библиотеке',
+                      en: 'New Library Material',
                       it: 'Nuovo Ingrediente in Libreria',
-                      es: 'Nuevo Ingrediente en Biblioteca',
+                      es: 'Nuevo Material en Biblioteca',
                       de: 'Neuer Bibliotheks-Rohstoff',
                     })}
               </h2>
             </div>
 
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <select
+                defaultValue=""
+                onChange={(e) => {
+                  if (e.target.value) handlePrefillFromFraterworks(e.target.value);
+                }}
+                className="max-w-[230px] rounded-lg border border-[#D2D0CE] bg-[#FAF9F8] px-2.5 py-1.5 text-xs text-[#181917] focus:border-[var(--theme-accent)] focus:outline-none"
+              >
+                <option value="">
+                  {tr(language, {
+                    ru: 'Заполнить из эталонов Fraterworks...',
+                    en: 'Pre-fill from Fraterworks reference...',
+                    it: 'Compila da riferimento Fraterworks...',
+                    es: 'Rellenar desde referencia Fraterworks...',
+                    de: 'Aus Fraterworks-Referenz füllen...',
+                  })}
+                </option>
+                {FRATERWORKS_REFERENCE_MATERIALS.map((fw) => (
+                  <option key={fw.id} value={fw.id}>
+                    {fw.name} (Impact {fw.odorImpact})
+                  </option>
+                ))}
+              </select>
+
               {formMode === 'create' && studioIngredients.length > 0 && (
                 <select
                   defaultValue=""
                   onChange={(e) => {
                     if (e.target.value) handlePrefillFromStudio(e.target.value);
                   }}
-                  aria-label={tr(language, {
-                    ru: 'Заполнить из базы склада',
-                    en: 'Pre-fill from studio stock',
-                    it: 'Compila dall’archivio studio',
-                    es: 'Rellenar desde el stock del taller',
-                    de: 'Aus Atelier-Bestand übernehmen',
-                  })}
-                  className="max-w-[230px] rounded-lg border border-[#D2D0CE] bg-[#FAF9F8] px-2.5 py-1.5 text-xs text-[#181917] focus:border-[var(--theme-accent)] focus:outline-none"
+                  className="max-w-[220px] rounded-lg border border-[#D2D0CE] bg-[#FAF9F8] px-2.5 py-1.5 text-xs text-[#181917] focus:border-[var(--theme-accent)] focus:outline-none"
                 >
                   <option value="">
                     {tr(language, {
-                      ru: 'Подставить из каталога склада...',
-                      en: 'Pre-fill from studio catalog...',
-                      it: 'Precompila dal catalogo...',
-                      es: 'Rellenar desde el catálogo...',
-                      de: 'Aus Katalog vorbefüllen...',
+                      ru: 'Подставить со склада...',
+                      en: 'Pre-fill from studio stock...',
+                      it: 'Precompila dallo studio...',
+                      es: 'Rellenar desde el taller...',
+                      de: 'Aus Bestand vorbefüllen...',
                     })}
                   </option>
                   {studioIngredients.map((ing) => (
@@ -515,13 +722,6 @@ export function IngredientLibrary({
                 type="button"
                 onClick={() => setFormMode('closed')}
                 className="rounded-lg p-1.5 text-[#605E5C] hover:bg-[#F3F2F1] hover:text-[#181917]"
-                aria-label={tr(language, {
-                  ru: 'Закрыть форму',
-                  en: 'Close form',
-                  it: 'Chiudi modulo',
-                  es: 'Cerrar formulario',
-                  de: 'Formular schließen',
-                })}
               >
                 <X className="h-4 w-4" />
               </button>
@@ -532,10 +732,10 @@ export function IngredientLibrary({
             <div className="sm:col-span-5">
               <label className="block text-xs font-medium text-[#605E5C] mb-1">
                 {tr(language, {
-                  ru: 'Название ингредиента *',
-                  en: 'Ingredient Name *',
+                  ru: 'Название вещества *',
+                  en: 'Material Name *',
                   it: 'Nome Ingrediente *',
-                  es: 'Nombre del Ingrediente *',
+                  es: 'Nombre del Material *',
                   de: 'Rohstoffname *',
                 })}
               </label>
@@ -544,32 +744,20 @@ export function IngredientLibrary({
                 required
                 value={formName}
                 onChange={(e) => setFormName(e.target.value)}
-                placeholder={tr(language, {
-                  ru: 'Напр.: Гедион HC, Роза Отто, Почки чёрной смородины...',
-                  en: 'e.g., Hedione HC, Rose Otto, Blackcurrant Bud...',
-                  it: 'Es.: Hedione HC, Rosa Otto, Gemme di Ribes Nero...',
-                  es: 'Ej.: Hedione HC, Rosa Otto, Yemas de Grosella Negra...',
-                  de: 'Z. B.: Hedione HC, Rosenöl Otto, Schwarze Johannisbeere...',
-                })}
+                placeholder="Hedione HC, Javanol, Iso E Super..."
                 className="w-full rounded-lg border border-[#D2D0CE] bg-white px-3 py-2 text-sm text-[#181917] focus:border-[var(--theme-accent)] focus:outline-none"
               />
             </div>
 
             <div className="sm:col-span-3">
               <label className="block text-xs font-medium text-[#605E5C] mb-1">
-                {tr(language, {
-                  ru: 'CAS / INCI / синоним',
-                  en: 'CAS / INCI / Synonym',
-                  it: 'CAS / INCI / Sinonimo',
-                  es: 'CAS / INCI / Sinónimo',
-                  de: 'CAS / INCI / Synonym',
-                })}
+                CAS / INCI
               </label>
               <input
                 type="text"
                 value={formCas}
                 onChange={(e) => setFormCas(e.target.value)}
-                placeholder="CAS 24851-98-7"
+                placeholder="24851-98-7"
                 className="w-full rounded-lg border border-[#D2D0CE] bg-white px-3 py-2 font-mono text-xs text-[#181917] focus:border-[var(--theme-accent)] focus:outline-none"
               />
             </div>
@@ -621,7 +809,8 @@ export function IngredientLibrary({
             </div>
           </div>
 
-          <div className="grid grid-cols-1 sm:grid-cols-12 gap-3">
+          {/* Fraterworks Metrics Row: Origin, Odor Impact, Substantivity Hours */}
+          <div className="grid grid-cols-1 sm:grid-cols-12 gap-3 rounded-lg border border-[#EDEBE9] bg-[#FAF9F8] p-3">
             <div className="sm:col-span-4">
               <label className="block text-xs font-medium text-[#605E5C] mb-1">
                 {tr(language, {
@@ -635,7 +824,7 @@ export function IngredientLibrary({
               <select
                 value={formOrigin}
                 onChange={(e) => setFormOrigin(e.target.value as IngredientOrigin)}
-                className="w-full rounded-lg border border-[#D2D0CE] bg-white px-3 py-2 text-xs text-[#181917] focus:border-[var(--theme-accent)] focus:outline-none"
+                className="w-full rounded-lg border border-[#D2D0CE] bg-white px-2.5 py-1.5 text-xs text-[#181917] focus:border-[var(--theme-accent)] focus:outline-none"
               >
                 {(Object.keys(INGREDIENT_ORIGIN_LABELS) as IngredientOrigin[]).map((o) => (
                   <option key={o} value={o}>
@@ -645,47 +834,146 @@ export function IngredientLibrary({
               </select>
             </div>
 
-            <div className="sm:col-span-8">
+            <div className="sm:col-span-4">
               <label className="block text-xs font-medium text-[#605E5C] mb-1">
                 {tr(language, {
-                  ru: 'Время на блоттере (сколько держится на блоттере)',
-                  en: 'Time on Blotter (how long it lasts on paper strip)',
-                  it: 'Durata su mouillette (quanto persiste sulla striscia)',
-                  es: 'Duración en secante (cuánto perdura en tira olfativa)',
-                  de: 'Haltbarkeit auf dem Riechstreifen (Duftdauer)',
+                  ru: 'Сила (Odor Impact, 10–1000)',
+                  en: 'Odor Impact (10–1000)',
+                  it: 'Odor Impact (10–1000)',
+                  es: 'Odor Impact (10–1000)',
+                  de: 'Odor Impact (10–1000)',
                 })}
               </label>
-              <div className="flex flex-col sm:flex-row gap-2">
-                <input
-                  type="text"
-                  value={formBlotterLongevity}
-                  onChange={(e) => setFormBlotterLongevity(e.target.value)}
-                  placeholder={tr(language, {
-                    ru: 'Напр.: 1–2 часа, 24 часа, 5–7 дней...',
-                    en: 'e.g., 1–2 hours, 24 hours, 5–7 days...',
-                    it: 'Es.: 1–2 ore, 24 ore, 5–7 giorni...',
-                    es: 'Ej.: 1–2 horas, 24 horas, 5–7 días...',
-                    de: 'Z. B.: 1–2 Std., 24 Std., 5–7 Tage...',
-                  })}
-                  className="flex-1 rounded-lg border border-[#D2D0CE] bg-white px-3 py-2 text-xs text-[#181917] focus:border-[var(--theme-accent)] focus:outline-none"
-                />
-                <div className="flex flex-wrap items-center gap-1">
-                  {BLOTTER_PRESETS[language].map((preset) => (
-                    <button
-                      key={preset}
-                      type="button"
-                      onClick={() => setFormBlotterLongevity(preset)}
-                      className={`rounded border px-2 py-1.5 font-mono text-[11px] transition-colors ${
-                        formBlotterLongevity === preset
-                          ? 'border-[var(--theme-accent)] bg-[var(--theme-accent)] text-white'
-                          : 'border-[#E1DFDD] bg-[#FAF9F8] text-[#575955] hover:bg-white'
-                      }`}
-                    >
-                      {preset}
-                    </button>
-                  ))}
+              <input
+                type="number"
+                min={10}
+                max={1000}
+                value={formOdorImpact}
+                onChange={(e) => setFormOdorImpact(e.target.value)}
+                className="w-full rounded-lg border border-[#D2D0CE] bg-white px-2.5 py-1.5 font-mono text-xs text-[#181917] focus:border-[var(--theme-accent)] focus:outline-none"
+              />
+            </div>
+
+            <div className="sm:col-span-4">
+              <label className="block text-xs font-medium text-[#605E5C] mb-1">
+                {tr(language, {
+                  ru: 'Субстантивность (часов, 1–400)',
+                  en: 'Substantivity (hours, 1–400)',
+                  it: 'Sostantività (ore, 1–400)',
+                  es: 'Sustantividad (horas, 1–400)',
+                  de: 'Substantivität (Std., 1–400)',
+                })}
+              </label>
+              <input
+                type="number"
+                min={1}
+                max={400}
+                value={formSubstantivityHours}
+                onChange={(e) => {
+                  setFormSubstantivityHours(e.target.value);
+                  setFormBlotterLongevity(`${e.target.value} ч`);
+                }}
+                className="w-full rounded-lg border border-[#D2D0CE] bg-white px-2.5 py-1.5 font-mono text-xs text-[#181917] focus:border-[var(--theme-accent)] focus:outline-none"
+              />
+            </div>
+          </div>
+
+          {/* Fraterworks Scent Breakdown Facets Editor */}
+          <div className="rounded-lg border border-[#EDEBE9] bg-[#FAF9F8] p-3.5 space-y-2.5">
+            <div className="flex items-center justify-between">
+              <label className="text-xs font-semibold text-[#181917] flex items-center gap-1.5">
+                <Sparkles className="h-3.5 w-3.5 text-[var(--theme-accent)]" />
+                {tr(language, {
+                  ru: 'Fraterworks Scent Breakdown (Грани и фасеты аромата в %)',
+                  en: 'Fraterworks Scent Breakdown (Olfactory Facets in %)',
+                  it: 'Fraterworks Scent Breakdown (Sfaccettature in %)',
+                  es: 'Fraterworks Scent Breakdown (Facetas en %)',
+                  de: 'Fraterworks Scent Breakdown (Duftfacetten in %)',
+                })}
+              </label>
+              {formFacets.length < 4 && (
+                <button
+                  type="button"
+                  onClick={() =>
+                    setFormFacets([
+                      ...formFacets,
+                      { facet: 'Nuance', family: formFamily, percent: 15 },
+                    ])
+                  }
+                  className="text-xs font-medium text-[var(--theme-accent)] hover:underline"
+                >
+                  + {tr(language, { ru: 'Добавить грань', en: 'Add facet', it: 'Aggiungi', es: 'Añadir', de: 'Facette' })}
+                </button>
+              )}
+            </div>
+
+            <div className="space-y-2">
+              {formFacets.map((fc, idx) => (
+                <div key={idx} className="grid grid-cols-12 gap-2 items-center">
+                  <input
+                    type="text"
+                    value={fc.facet}
+                    onChange={(e) =>
+                      setFormFacets(
+                        formFacets.map((item, i) =>
+                          i === idx ? { ...item, facet: e.target.value } : item
+                        )
+                      )
+                    }
+                    placeholder="Velvety Cedarwood, Sparkling Bergamot..."
+                    className="col-span-6 rounded border border-[#D2D0CE] bg-white px-2.5 py-1 text-xs text-[#181917]"
+                  />
+                  <select
+                    value={fc.family}
+                    onChange={(e) =>
+                      setFormFacets(
+                        formFacets.map((item, i) =>
+                          i === idx
+                            ? { ...item, family: e.target.value as OlfactoryFamilyKey }
+                            : item
+                        )
+                      )
+                    }
+                    className="col-span-3 rounded border border-[#D2D0CE] bg-white px-2 py-1 text-xs text-[#181917]"
+                  >
+                    {OLFACTORY_FAMILIES.map((f) => (
+                      <option key={f.key} value={f.key}>
+                        {getOlfactoryFamilyLabel(f.key, language)}
+                      </option>
+                    ))}
+                  </select>
+                  <div className="col-span-2 flex items-center gap-1">
+                    <input
+                      type="number"
+                      min={1}
+                      max={100}
+                      value={fc.percent}
+                      onChange={(e) =>
+                        setFormFacets(
+                          formFacets.map((item, i) =>
+                            i === idx ? { ...item, percent: Number(e.target.value) || 0 } : item
+                          )
+                        )
+                      }
+                      className="w-full rounded border border-[#D2D0CE] bg-white px-2 py-1 text-right font-mono text-xs text-[#181917]"
+                    />
+                    <span className="text-xs text-[#605E5C]">%</span>
+                  </div>
+                  <div className="col-span-1 text-right">
+                    {formFacets.length > 1 && (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setFormFacets(formFacets.filter((_, i) => i !== idx))
+                        }
+                        className="rounded p-1 text-[#797775] hover:text-[#B91C1C]"
+                      >
+                        <Trash2 className="h-3.5 w-3.5" />
+                      </button>
+                    )}
+                  </div>
                 </div>
-              </div>
+              ))}
             </div>
           </div>
 
@@ -704,13 +992,6 @@ export function IngredientLibrary({
                 rows={3}
                 value={formProperties}
                 onChange={(e) => setFormProperties(e.target.value)}
-                placeholder={tr(language, {
-                  ru: 'Летучесть, стойкость на блоттере/коже, рабочая концентрация, лимит IFRA, в чём растворяется...',
-                  en: 'Volatility, tenacity in hours, recommended dilution, IFRA limit, blending behavior...',
-                  it: 'Volatilità, persistenza su pelle/mouillette, diluizione consigliata, limite IFRA...',
-                  es: 'Volatilidad, fijación en horas, dilución recomendada, límite IFRA, solubilidad...',
-                  de: 'Flüchtigkeit, Haftung, empfohlene Verdünnung, IFRA-Limit, Mischverhalten...',
-                })}
                 className="w-full rounded-lg border border-[#D2D0CE] bg-white px-3 py-2 text-xs leading-relaxed text-[#181917] focus:border-[var(--theme-accent)] focus:outline-none"
               />
             </div>
@@ -729,13 +1010,6 @@ export function IngredientLibrary({
                 rows={3}
                 value={formScentDesc}
                 onChange={(e) => setFormScentDesc(e.target.value)}
-                placeholder={tr(language, {
-                  ru: 'Опишите старт, грани, текстуру, теплоту/свежесть и базу раскрытия...',
-                  en: 'Describe the opening, facets, texture, warmth, and dry-down...',
-                  it: 'Descrivi apertura, sfaccettature, texture, calore e fondo...',
-                  es: 'Describe la salida, facetas, textura, calidez y secado...',
-                  de: 'Beschreiben Sie Kopfnote, Facetten, Textur, Wärme und Ausklang...',
-                })}
                 className="w-full rounded-lg border border-[#D2D0CE] bg-white px-3 py-2 text-xs leading-relaxed text-[#181917] focus:border-[var(--theme-accent)] focus:outline-none"
               />
             </div>
@@ -769,33 +1043,6 @@ export function IngredientLibrary({
               icon={<Lightbulb className="h-3.5 w-3.5 text-[var(--theme-accent)]" />}
             />
           </div>
-
-          {formMode === 'create' && (
-            <div>
-              <label className="block text-xs font-medium text-[#605E5C] mb-1">
-                {tr(language, {
-                  ru: 'Первая личная заметка (необязательно)',
-                  en: 'Initial personal note (optional)',
-                  it: 'Prima nota personale (facoltativa)',
-                  es: 'Primera nota personal (opcional)',
-                  de: 'Erste persönliche Notiz (optional)',
-                })}
-              </label>
-              <input
-                type="text"
-                value={formInitialNote}
-                onChange={(e) => setFormInitialNote(e.target.value)}
-                placeholder={tr(language, {
-                  ru: 'Идеи сочетаний, впечатления с блоттера, особенности пробника...',
-                  en: 'Pairing ideas, blotter impressions, supplier sample quality...',
-                  it: 'Idee di abbinamento, impressioni su mouillette, qualità del campione...',
-                  es: 'Ideas de mezcla, impresiones en secante, calidad de la muestra...',
-                  de: 'Kombinationsideen, Riechstreifen-Eindrücke, Probenqualität...',
-                })}
-                className="w-full rounded-lg border border-[#D2D0CE] bg-white px-3 py-2 text-xs text-[#181917] focus:border-[var(--theme-accent)] focus:outline-none"
-              />
-            </div>
-          )}
 
           <div className="flex items-center justify-end gap-2 pt-1">
             <button
@@ -839,18 +1086,18 @@ export function IngredientLibrary({
 
       {/* Search & Filters Bar */}
       <div className="rounded-xl border border-[#E1DFDD] bg-white p-3.5 flex flex-wrap items-center gap-2.5">
-        <div className="relative flex-1 min-w-[210px]">
+        <div className="relative flex-1 min-w-[220px]">
           <Search className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-[#797775]" />
           <input
             type="text"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             placeholder={tr(language, {
-              ru: 'Поиск по названию, CAS, запаху, свойствам и заметкам...',
-              en: 'Search name, CAS, scent, properties, or notes...',
-              it: 'Cerca per nome, CAS, odore, proprietà o note...',
-              es: 'Buscar por nombre, CAS, aroma, propiedades o notas...',
-              de: 'Suche nach Name, CAS, Duft, Eigenschaften oder Notizen...',
+              ru: 'Поиск по названию, CAS, граням Scent Breakdown, запаху или заметкам...',
+              en: 'Search name, CAS, Scent Breakdown facets, smell, or notes...',
+              it: 'Cerca per nome, CAS, sfaccettature Scent Breakdown, odore o note...',
+              es: 'Buscar por nombre, CAS, facetas Scent Breakdown, aroma o notas...',
+              de: 'Suche nach Name, CAS, Scent-Breakdown-Facetten, Duft oder Notizen...',
             })}
             className="w-full rounded-lg border border-[#E1DFDD] bg-[#FAF9F8] pl-8 pr-3 py-1.5 text-xs text-[#181917] placeholder:text-[#797775] focus:border-[var(--theme-accent)] focus:bg-white focus:outline-none"
           />
@@ -859,13 +1106,6 @@ export function IngredientLibrary({
         <select
           value={tierFilter}
           onChange={(e) => setTierFilter(e.target.value as 'all' | NoteTier)}
-          aria-label={tr(language, {
-            ru: 'Фильтр по ярусу ноты',
-            en: 'Filter by note tier',
-            it: 'Filtra per livello nota',
-            es: 'Filtrar por nivel de nota',
-            de: 'Nach Duftebene filtern',
-          })}
           className="rounded-lg border border-[#E1DFDD] bg-white px-2.5 py-1.5 text-xs text-[#181917] focus:border-[var(--theme-accent)] focus:outline-none"
         >
           <option value="all">
@@ -887,13 +1127,6 @@ export function IngredientLibrary({
         <select
           value={familyFilter}
           onChange={(e) => setFamilyFilter(e.target.value as 'all' | OlfactoryFamilyKey)}
-          aria-label={tr(language, {
-            ru: 'Фильтр по семейству',
-            en: 'Filter by olfactory family',
-            it: 'Filtra per famiglia olfattiva',
-            es: 'Filtrar por familia olfativa',
-            de: 'Nach Duftfamilie filtern',
-          })}
           className="rounded-lg border border-[#E1DFDD] bg-white px-2.5 py-1.5 text-xs text-[#181917] focus:border-[var(--theme-accent)] focus:outline-none"
         >
           <option value="all">
@@ -913,43 +1146,60 @@ export function IngredientLibrary({
         </select>
 
         <select
-          value={originFilter}
-          onChange={(e) => setOriginFilter(e.target.value as 'all' | IngredientOrigin)}
-          aria-label={tr(language, {
-            ru: 'Фильтр по происхождению',
-            en: 'Filter by origin',
-            it: 'Filtra per origine',
-            es: 'Filtrar por origen',
-            de: 'Nach Herkunft filtern',
-          })}
+          value={impactFilter}
+          onChange={(e) => setImpactFilter(e.target.value as LibraryImpactFilter)}
           className="rounded-lg border border-[#E1DFDD] bg-white px-2.5 py-1.5 text-xs text-[#181917] focus:border-[var(--theme-accent)] focus:outline-none"
         >
           <option value="all">
             {tr(language, {
-              ru: 'Все типы сырья',
-              en: 'All origins',
-              it: 'Tutte le origini',
-              es: 'Todos los orígenes',
-              de: 'Alle Herkünfte',
+              ru: 'Любая сила / стойкость',
+              en: 'Any strength / volatility',
+              it: 'Qualsiasi impatto / volatilità',
+              es: 'Cualquier fuerza / volatilidad',
+              de: 'Alle Stärken / Haltbarkeiten',
             })}
           </option>
-          {(Object.keys(INGREDIENT_ORIGIN_LABELS) as IngredientOrigin[]).map((o) => (
-            <option key={o} value={o}>
-              {getIngredientOriginLabel(o, language)}
-            </option>
-          ))}
+          <option value="high_impact">
+            {tr(language, {
+              ru: 'Высокий импакт (Impact ≥ 200)',
+              en: 'High Impact (≥ 200)',
+              it: 'Alto Impatto (≥ 200)',
+              es: 'Alto Impacto (≥ 200)',
+              de: 'Hoher Impact (≥ 200)',
+            })}
+          </option>
+          <option value="ultra_booster">
+            {tr(language, {
+              ru: 'Ультра-бустеры (Impact ≥ 450)',
+              en: 'Ultra Boosters (≥ 450)',
+              it: 'Ultra Booster (≥ 450)',
+              es: 'Ultra Boosters (≥ 450)',
+              de: 'Ultra-Booster (≥ 450)',
+            })}
+          </option>
+          <option value="blender">
+            {tr(language, {
+              ru: 'Прозрачные блендеры (Impact ≤ 85)',
+              en: 'Transparent Blenders (≤ 85)',
+              it: 'Blender Trasparenti (≤ 85)',
+              es: 'Mezcladores Transparentes (≤ 85)',
+              de: 'Transparente Blender (≤ 85)',
+            })}
+          </option>
+          <option value="fixative">
+            {tr(language, {
+              ru: 'Фиксаторы (≥ 168 ч на блоттере)',
+              en: 'Fixatives (≥ 168h on blotter)',
+              it: 'Fissativi (≥ 168h su mouillette)',
+              es: 'Fijadores (≥ 168h en secante)',
+              de: 'Fixateure (≥ 168 Std.)',
+            })}
+          </option>
         </select>
 
         <select
           value={ratingFilter}
           onChange={(e) => setRatingFilter(e.target.value as LibraryRatingFilter)}
-          aria-label={tr(language, {
-            ru: 'Фильтр по оценке',
-            en: 'Filter by rating',
-            it: 'Filtra per valutazione',
-            es: 'Filtrar por valoración',
-            de: 'Nach Bewertung filtern',
-          })}
           className="rounded-lg border border-[#E1DFDD] bg-white px-2.5 py-1.5 text-xs text-[#181917] focus:border-[var(--theme-accent)] focus:outline-none"
         >
           <option value="all">
@@ -984,13 +1234,6 @@ export function IngredientLibrary({
         <select
           value={sortBy}
           onChange={(e) => setSortBy(e.target.value as LibrarySortBy)}
-          aria-label={tr(language, {
-            ru: 'Сортировка библиотеки',
-            en: 'Sort library',
-            it: 'Ordina libreria',
-            es: 'Ordenar biblioteca',
-            de: 'Bibliothek sortieren',
-          })}
           className="rounded-lg border border-[#E1DFDD] bg-white px-2.5 py-1.5 text-xs text-[#181917] focus:border-[var(--theme-accent)] focus:outline-none"
         >
           <option value="updated">
@@ -1000,6 +1243,24 @@ export function IngredientLibrary({
               it: 'Aggiornati di recente',
               es: 'Actualizados recientemente',
               de: 'Zuletzt aktualisiert',
+            })}
+          </option>
+          <option value="impact_desc">
+            {tr(language, {
+              ru: 'Сила звучания (Odor Impact ↓)',
+              en: 'Odor Impact (High → Low)',
+              it: 'Odor Impact (Alto → Basso)',
+              es: 'Odor Impact (Mayor → Menor)',
+              de: 'Duftstärke (Odor Impact ↓)',
+            })}
+          </option>
+          <option value="substantivity_desc">
+            {tr(language, {
+              ru: 'Стойкость на блоттере (часы ↓)',
+              en: 'Substantivity (Hours ↓)',
+              it: 'Sostantività (Ore ↓)',
+              es: 'Sustantividad (Horas ↓)',
+              de: 'Haltbarkeit (Stunden ↓)',
             })}
           </option>
           <option value="scent_desc">
@@ -1039,38 +1300,13 @@ export function IngredientLibrary({
           {filteredLibrary.length === 0 ? (
             <div className="rounded-xl border border-dashed border-[#D2D0CE] bg-white p-8 text-center space-y-2">
               <p className="text-sm font-medium text-[#181917]">
-                {library.length === 0
-                  ? tr(language, {
-                      ru: 'В библиотеке пока нет ингредиентов',
-                      en: 'Your library is empty',
-                      it: 'La tua libreria è vuota',
-                      es: 'Tu biblioteca está vacía',
-                      de: 'Ihre Bibliothek ist leer',
-                    })
-                  : tr(language, {
-                      ru: 'Ничего не найдено по фильтрам',
-                      en: 'No matching ingredients',
-                      it: 'Nessun ingrediente trovato',
-                      es: 'Sin ingredientes coincidentes',
-                      de: 'Keine passenden Rohstoffe',
-                    })}
-              </p>
-              <p className="text-xs text-[#605E5C]">
-                {library.length === 0
-                  ? tr(language, {
-                      ru: 'Добавляйте известные материалы, чтобы сохранять свойства, запах, оценки и заметки.',
-                      en: 'Add known aroma materials to record their properties, scent, ratings, and notes.',
-                      it: 'Aggiungi materie aromatiche per salvarne proprietà, odore, valutazioni e note.',
-                      es: 'Añade materias aromáticas para guardar propiedades, aroma, valoraciones y notas.',
-                      de: 'Fügen Sie bekannte Rohstoffe hinzu, um Eigenschaften, Duft, Bewertungen und Notizen zu speichern.',
-                    })
-                  : tr(language, {
-                      ru: 'Попробуйте сбросить строку поиска или фильтры.',
-                      en: 'Try clearing search or filter criteria.',
-                      it: 'Prova a reimpostare la ricerca o i filtri.',
-                      es: 'Prueba a limpiar la búsqueda o los filtros.',
-                      de: 'Setzen Sie die Suche oder Filter zurück.',
-                    })}
+                {tr(language, {
+                  ru: 'Ничего не найдено по фильтрам',
+                  en: 'No matching materials',
+                  it: 'Nessun ingrediente trovato',
+                  es: 'Sin materiales coincidentes',
+                  de: 'Keine passenden Rohstoffe',
+                })}
               </p>
             </div>
           ) : (
@@ -1086,11 +1322,13 @@ export function IngredientLibrary({
                   })}
                 </span>
                 <span className="font-mono text-[11px] text-[#797775]">
-                  IFF · ParfClub · PerfumeRawMaterial
+                  Fraterworks · IFF · Symrise · Givaudan
                 </span>
               </div>
               {visibleLibrary.map((item) => {
                 const active = selectedItem?.id === item.id;
+                const passport = passportById.get(item.id) || getMaterialScentPassport(item);
+
                 return (
                   <button
                     key={item.id}
@@ -1114,18 +1352,49 @@ export function IngredientLibrary({
                           <span>{getNoteTierShort(item.tier, language)}</span>
                           <span aria-hidden="true">·</span>
                           <span>{getOlfactoryFamilyLabel(item.family, language)}</span>
-                          {item.inciOrCas && (
+                          {(item.inciOrCas || passport.inciOrCas) && (
                             <>
                               <span aria-hidden="true">·</span>
-                              <span className="font-mono">{item.inciOrCas}</span>
+                              <span className="font-mono">
+                                {item.inciOrCas || passport.inciOrCas}
+                              </span>
                             </>
                           )}
                         </div>
                       </div>
-                      <span className="font-mono text-[11px] tabular-nums text-[#797775] shrink-0">
-                        {item.notes.length}{' '}
-                        {tr(language, { ru: 'зам.', en: 'notes', it: 'note', es: 'notas', de: 'Not.' })}
+                      <span className="rounded bg-[#FAF9F8] border border-[#E1DFDD] px-1.5 py-0.5 font-mono text-[11px] font-semibold tabular-nums text-[#181917] shrink-0">
+                        {tr(language, { ru: 'Импакт', en: 'Impact', it: 'Impatto', es: 'Impacto', de: 'Impact' })} {passport.odorImpact}
                       </span>
+                    </div>
+
+                    {/* Fraterworks Scent Breakdown Mini Bar */}
+                    <div className="mt-2.5 space-y-1">
+                      <div className="flex h-2 w-full overflow-hidden rounded-full bg-[#EAEAE6]">
+                        {passport.scentBreakdown.map((facet, fIdx) => (
+                          <div
+                            key={`${item.id}-f-${fIdx}`}
+                            style={{
+                              width: `${facet.percent}%`,
+                              backgroundColor: FAMILY_HEX_MAP[facet.family],
+                            }}
+                            title={`${getLocalizedFacetName(facet.facet, language)}: ${facet.percent}%`}
+                            className="h-full"
+                          />
+                        ))}
+                      </div>
+                      <div className="flex flex-wrap items-center gap-x-2 text-[11px] text-[#575955] truncate">
+                        {passport.scentBreakdown.slice(0, 3).map((b, idx) => (
+                          <span key={idx} className="inline-flex items-center gap-1">
+                            <span
+                              className="h-1.5 w-1.5 rounded-full"
+                              style={{ backgroundColor: FAMILY_HEX_MAP[b.family] }}
+                            />
+                            <span>
+                              {getLocalizedFacetName(b.facet, language)} <strong>{b.percent}%</strong>
+                            </span>
+                          </span>
+                        ))}
+                      </div>
                     </div>
 
                     {item.scentDescription && (
@@ -1137,42 +1406,22 @@ export function IngredientLibrary({
                     <div className="mt-3 flex flex-wrap items-center gap-x-4 gap-y-1.5 border-t border-[#EDEBE9] pt-2.5 text-xs">
                       <div className="flex items-center gap-1.5">
                         <Sparkles className="h-3.5 w-3.5 text-[#D97706]" />
-                        <span className="text-[#605E5C]">
-                          {tr(language, {
-                            ru: 'Запах:',
-                            en: 'Smell:',
-                            it: 'Odore:',
-                            es: 'Aroma:',
-                            de: 'Duft:',
-                          })}
-                        </span>
                         <span className="font-mono font-semibold tabular-nums text-[#181917]">
                           {item.scentRating}/10
                         </span>
                       </div>
                       <div className="flex items-center gap-1.5">
                         <Lightbulb className="h-3.5 w-3.5 text-[var(--theme-accent)]" />
-                        <span className="text-[#605E5C]">
-                          {tr(language, {
-                            ru: 'Идеи:',
-                            en: 'Ideas:',
-                            it: 'Idee:',
-                            es: 'Ideas:',
-                            de: 'Ideen:',
-                          })}
-                        </span>
                         <span className="font-mono font-semibold tabular-nums text-[#181917]">
                           {item.futureIdeasRating}/10
                         </span>
                       </div>
-                      {item.blotterLongevity && (
-                        <div className="flex items-center gap-1 text-[#575955] ml-auto">
-                          <Clock className="h-3 w-3 text-[#797775] shrink-0" />
-                          <span className="font-mono text-[11px] tabular-nums">
-                            {item.blotterLongevity}
-                          </span>
-                        </div>
-                      )}
+                      <div className="flex items-center gap-1 text-[#575955] ml-auto">
+                        <Clock className="h-3 w-3 text-[#797775] shrink-0" />
+                        <span className="font-mono text-[11px] tabular-nums">
+                          ~{passport.substantivityHours}{tr(language, { ru: 'ч', en: 'h', it: 'h', es: 'h', de: 'Std.' })} · {getLocalizedVolatilityLabel(passport.volatilityLabel, language).split(' ')[0]}
+                        </span>
+                      </div>
                     </div>
                   </button>
                 );
@@ -1212,9 +1461,9 @@ export function IngredientLibrary({
           )}
         </div>
 
-        {/* Right Detail & Notes Inspector */}
+        {/* Right Detail & Fraterworks Passport Inspector */}
         <div className="lg:col-span-7 lg:sticky lg:top-4 lg:self-start">
-          {selectedItem ? (
+          {selectedItem && selectedPassport ? (
             <div className="rounded-xl border border-[#E1DFDD] bg-white p-6 space-y-5">
               {/* Item Header */}
               <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between border-b border-[#EDEBE9] pb-4">
@@ -1227,38 +1476,23 @@ export function IngredientLibrary({
                     <span>{getOlfactoryFamilyLabel(selectedItem.family, language)}</span>
                     <span aria-hidden="true">·</span>
                     <span>{getIngredientOriginLabel(selectedItem.origin, language)}</span>
-                    {selectedItem.inciOrCas && (
+                    {(selectedItem.inciOrCas || selectedPassport.inciOrCas) && (
                       <>
                         <span aria-hidden="true">·</span>
-                        <span className="font-mono">{selectedItem.inciOrCas}</span>
+                        <span className="font-mono">
+                          CAS {selectedItem.inciOrCas || selectedPassport.inciOrCas}
+                        </span>
                       </>
                     )}
                   </div>
                   <h2 className="mt-1 text-xl font-bold text-[#181917]">
                     {selectedItem.name}
                   </h2>
-                  <div className="mt-1.5 inline-flex items-center gap-1.5 rounded-md border border-[#EDEBE9] bg-[#FAF9F8] px-2.5 py-1 text-xs text-[#323130]">
-                    <Clock className="h-3.5 w-3.5 text-[var(--theme-accent)] shrink-0" />
-                    <span className="text-[#605E5C]">
-                      {tr(language, {
-                        ru: 'На блоттере:',
-                        en: 'Time on blotter:',
-                        it: 'Su mouillette:',
-                        es: 'En secante:',
-                        de: 'Auf Riechstreifen:',
-                      })}
-                    </span>
-                    <span className="font-mono font-semibold text-[#181917]">
-                      {selectedItem.blotterLongevity ||
-                        tr(language, {
-                          ru: 'Не указано',
-                          en: 'Not specified',
-                          it: 'Non specificato',
-                          es: 'No especificado',
-                          de: 'Nicht angegeben',
-                        })}
-                    </span>
-                  </div>
+                  {selectedPassport.synonyms.length > 0 && (
+                    <p className="mt-0.5 text-xs text-[#797775]">
+                      {selectedPassport.synonyms.join(' · ')}
+                    </p>
+                  )}
                 </div>
 
                 <div className="flex flex-wrap items-center gap-1.5 shrink-0">
@@ -1267,13 +1501,6 @@ export function IngredientLibrary({
                       type="button"
                       onClick={() => onAddToStudioWishlist(selectedItem)}
                       className="inline-flex items-center gap-1.5 rounded-lg border border-[#D2D0CE] bg-[#FAF9F8] px-2.5 py-1.5 text-xs font-medium text-[#181917] hover:bg-white"
-                      title={tr(language, {
-                        ru: 'Добавить в каталог склада со статусом «Хочу купить»',
-                        en: 'Add to studio Ingredients catalog as Wishlist',
-                        it: 'Aggiungi al catalogo studio come Da acquistare',
-                        es: 'Añadir al catálogo del taller como Por comprar',
-                        de: 'Als Wunschliste zum Atelier-Katalog hinzufügen',
-                      })}
                     >
                       <ShoppingBag className="h-3.5 w-3.5 text-[var(--theme-accent)]" />
                       <span>
@@ -1307,17 +1534,233 @@ export function IngredientLibrary({
                     type="button"
                     onClick={() => onDeleteLibraryItem(selectedItem.id)}
                     className="inline-flex items-center gap-1 rounded-lg border border-[#FECACA] bg-[#FEF2F2] px-2.5 py-1.5 text-xs font-medium text-[#B91C1C] hover:bg-[#FEE2E2]"
-                    aria-label={`${tr(language, {
-                      ru: 'Удалить',
-                      en: 'Delete',
-                      it: 'Elimina',
-                      es: 'Eliminar',
-                      de: 'Löschen',
-                    })} ${selectedItem.name}`}
                   >
                     <Trash2 className="h-3.5 w-3.5" />
                   </button>
                 </div>
+              </div>
+
+              {/* FRATERWORKS SCENT PASSPORT: Scent Breakdown + Odor Impact + Volatility */}
+              <div className="rounded-xl border border-[#E1DFDD] bg-[#FAF9F8] p-4 space-y-4">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="text-xs font-semibold uppercase tracking-wider text-[#181917] flex items-center gap-1.5">
+                    <Activity className="h-4 w-4 text-[var(--theme-accent)]" />
+                    <span>
+                      {tr(language, {
+                        ru: 'Fraterworks Scent Passport: Разбор профиля, Сила и Летучесть',
+                        en: 'Fraterworks Scent Passport: Breakdown, Strength & Volatility',
+                        it: 'Passaporto Olfattivo Fraterworks: Profilo, Forza e Volatilità',
+                        es: 'Pasaporte Olfativo Fraterworks: Desglose, Fuerza y Volatilidad',
+                        de: 'Fraterworks Scent Passport: Profil, Duftstärke & Flüchtigkeit',
+                      })}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Multi-Facet Scent Breakdown Bar & Legend */}
+                <div className="rounded-lg border border-[#E1DFDD] bg-white p-3.5 space-y-2.5">
+                  <div className="flex h-3.5 w-full overflow-hidden rounded-md bg-[#EAEAE6]">
+                    {selectedPassport.scentBreakdown.map((facet, idx) => (
+                      <div
+                        key={idx}
+                        style={{
+                          width: `${facet.percent}%`,
+                          backgroundColor: FAMILY_HEX_MAP[facet.family],
+                        }}
+                        title={`${getLocalizedFacetName(facet.facet, language)}: ${facet.percent}%`}
+                        className="h-full first:rounded-l-md last:rounded-r-md transition-all"
+                      />
+                    ))}
+                  </div>
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1">
+                    {selectedPassport.scentBreakdown.map((facet, idx) => (
+                      <div
+                        key={idx}
+                        className="flex items-center justify-between rounded border border-[#EDEBE9] bg-[#FAF9F8] px-2.5 py-1.5 text-xs"
+                      >
+                        <span className="inline-flex items-center gap-2 truncate text-[#181917]">
+                          <span
+                            className="h-2.5 w-2.5 rounded-xs shrink-0"
+                            style={{ backgroundColor: FAMILY_HEX_MAP[facet.family] }}
+                          />
+                          <span className="truncate font-medium">{getLocalizedFacetName(facet.facet, language)}</span>
+                        </span>
+                        <span className="font-mono font-bold tabular-nums text-[#181917] ml-2">
+                          {facet.percent}%
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Odor Impact & Volatility / Substantivity Gauges */}
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div className="rounded-lg border border-[#E1DFDD] bg-white p-3 space-y-1.5">
+                    <div className="flex items-center justify-between text-xs">
+                      <span className="inline-flex items-center gap-1.5 font-medium text-[#323130]">
+                        <Flame className="h-3.5 w-3.5 text-[#D97706]" />
+                        {tr(language, {
+                          ru: 'Сила запаха (Odor Impact)',
+                          en: 'Scent Strength (Odor Impact)',
+                          it: 'Forza Odore (Odor Impact)',
+                          es: 'Fuerza (Odor Impact)',
+                          de: 'Duftstärke (Odor Impact)',
+                        })}
+                      </span>
+                      <span className="font-mono text-sm font-bold text-[#181917]">
+                        {selectedPassport.odorImpact}
+                        <span className="text-[11px] font-normal text-[#797775]">/1000</span>
+                      </span>
+                    </div>
+                    <div className="h-2 w-full overflow-hidden rounded-full bg-[#EAEAE6]">
+                      <div
+                        style={{
+                          width: `${Math.min(100, Math.max(8, (selectedPassport.odorImpact / 600) * 100))}%`,
+                        }}
+                        className="h-full bg-[#D97706]"
+                      />
+                    </div>
+                    <p className="text-[11px] text-[#605E5C]">
+                      {selectedPassport.odorImpact >= 450
+                        ? tr(language, {
+                            ru: 'Ультра-мощный бустер (доминирует даже в следовых дозах)',
+                            en: 'Ultra-potent booster (dominates even in trace amounts)',
+                            it: 'Booster ultra-potente (domina anche in tracce)',
+                            es: 'Booster ultra-potente (domina incluso en trazas)',
+                            de: 'Ultra-starker Booster (dominiert schon in Spuren)',
+                          })
+                        : selectedPassport.odorImpact >= 180
+                          ? tr(language, {
+                              ru: 'Высокая ударная сила (выше средней по массе)',
+                              en: 'High odor impact (stronger than its weight %)',
+                              it: 'Alto impatto olfattivo',
+                              es: 'Alto impacto olfativo',
+                              de: 'Hohe Duftstärke',
+                            })
+                          : selectedPassport.odorImpact <= 80
+                            ? tr(language, {
+                                ru: 'Прозрачный / мягкий блендер (можно вводить большими дозами)',
+                                en: 'Transparent / soft blender (suitable for high dosages)',
+                                it: 'Blender trasparente e morbido',
+                                es: 'Mezclador suave y transparente',
+                                de: 'Transparenter, weicher Blender',
+                              })
+                            : tr(language, {
+                                ru: 'Стандартная интенсивность (100 = уровень бергамота)',
+                                en: 'Standard aromatic strength (100 = Bergamot baseline)',
+                                it: 'Intensità standard (100 = Bergamotto)',
+                                es: 'Intensidad estándar (100 = Bergamota)',
+                                de: 'Standard-Intensität (100 = Bergamotte)',
+                              })}
+                    </p>
+                  </div>
+
+                  <div className="rounded-lg border border-[#E1DFDD] bg-white p-3 space-y-1.5">
+                    <div className="flex items-center justify-between text-xs">
+                      <span className="inline-flex items-center gap-1.5 font-medium text-[#323130]">
+                        <Clock className="h-3.5 w-3.5 text-[var(--theme-accent)]" />
+                        {tr(language, {
+                          ru: 'Летучесть / Субстантивность',
+                          en: 'Volatility & Substantivity',
+                          it: 'Volatilità e Sostantività',
+                          es: 'Volatilidad y Sustantividad',
+                          de: 'Flüchtigkeit & Substantivität',
+                        })}
+                      </span>
+                      <span className="font-mono text-sm font-bold text-[#181917]">
+                        ~{selectedPassport.substantivityHours}{' '}
+                        {tr(language, { ru: 'ч', en: 'h', it: 'h', es: 'h', de: 'Std.' })}
+                      </span>
+                    </div>
+                    <div className="h-2 w-full overflow-hidden rounded-full bg-[#EAEAE6]">
+                      <div
+                        style={{
+                          width: `${Math.min(100, Math.max(8, (selectedPassport.substantivityHours / 400) * 100))}%`,
+                        }}
+                        className="h-full bg-[var(--theme-accent)]"
+                      />
+                    </div>
+                    <p className="text-[11px] text-[#605E5C]">
+                      {getLocalizedVolatilityLabel(selectedPassport.volatilityLabel, language)}
+                      {selectedItem.blotterLongevity
+                        ? ` · ${selectedItem.blotterLongevity}`
+                        : ''}
+                    </p>
+                  </div>
+                </div>
+
+                {/* Quick Add to Project Formula directly from Library */}
+                {projects.length > 0 && onAddToProjectFormula && (
+                  <div className="flex flex-wrap items-center gap-2 pt-2 border-t border-[#E1DFDD]">
+                    <span className="text-xs font-medium text-[#323130]">
+                      {tr(language, {
+                        ru: 'В формулу проекта:',
+                        en: 'Add to formula:',
+                        it: 'Alla formula:',
+                        es: 'A la fórmula:',
+                        de: 'Zur Formel:',
+                      })}
+                    </span>
+                    <select
+                      value={targetProjectId}
+                      onChange={(e) => setTargetProjectId(e.target.value)}
+                      className="min-w-[160px] flex-1 rounded-lg border border-[#D2D0CE] bg-white px-2.5 py-1.5 text-xs text-[#181917] focus:border-[var(--theme-accent)] focus:outline-none"
+                    >
+                      {projects.map((p) => (
+                        <option key={p.id} value={p.id}>
+                          {p.code} · {p.title}
+                        </option>
+                      ))}
+                    </select>
+                    <input
+                      type="number"
+                      min={0.01}
+                      step="0.05"
+                      value={addWeight}
+                      onChange={(e) => setAddWeight(e.target.value)}
+                      className="w-20 rounded-lg border border-[#D2D0CE] bg-white px-2 py-1.5 text-right font-mono text-xs tabular-nums text-[#181917]"
+                    />
+                    <span className="text-xs text-[#605E5C]">{gUnit}</span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const pid = targetProjectId || projects[0]?.id;
+                        if (!pid) return;
+                        onAddToProjectFormula(
+                          selectedItem,
+                          pid,
+                          Math.max(0.01, Number(addWeight) || 0.5)
+                        );
+                        setAddedFeedback(true);
+                        window.setTimeout(() => setAddedFeedback(false), 1600);
+                      }}
+                      className="inline-flex items-center gap-1.5 rounded-lg bg-[var(--theme-accent)] px-3 py-1.5 text-xs font-medium text-white hover:bg-[var(--theme-accent-hover)]"
+                    >
+                      {addedFeedback ? (
+                        <Check className="h-3.5 w-3.5" />
+                      ) : (
+                        <Plus className="h-3.5 w-3.5" />
+                      )}
+                      <span>
+                        {addedFeedback
+                          ? tr(language, {
+                              ru: 'Добавлено!',
+                              en: 'Added!',
+                              it: 'Aggiunto!',
+                              es: '¡Añadido!',
+                              de: 'Hinzugefügt!',
+                            })
+                          : tr(language, {
+                              ru: 'Добавить в формулу',
+                              en: 'Add to Formula',
+                              it: 'Aggiungi',
+                              es: 'Añadir',
+                              de: 'Hinzufügen',
+                            })}
+                      </span>
+                    </button>
+                  </div>
+                )}
               </div>
 
               {/* Dual Personal Ratings (Live Editable) */}
@@ -1375,7 +1818,7 @@ export function IngredientLibrary({
                     })}
                   </div>
                   <p className="whitespace-pre-line text-sm leading-relaxed text-[#181917]">
-                    {selectedItem.scentDescription || (
+                    {selectedItem.scentDescription || selectedPassport.scentDescription || (
                       <span className="text-[#8A8886]">
                         {tr(language, {
                           ru: 'Описание запаха не заполнено. Нажмите «Изменить».',
@@ -1412,6 +1855,66 @@ export function IngredientLibrary({
                       </span>
                     )}
                   </p>
+                  {(() => {
+                    const ifraStd = resolveIfraStandard({
+                      name: selectedItem.name,
+                      inciOrCas: selectedItem.inciOrCas || selectedPassport.inciOrCas,
+                    });
+                    const limitVal = ifraStd
+                      ? ifraStd.category4LimitPercent
+                      : selectedItem.ifraLimitPercent ?? selectedPassport.ifraLimitPercent;
+                    if (!ifraStd && limitVal === undefined) return null;
+                    const isBanned =
+                      ifraStd?.status === 'prohibited' ||
+                      ifraStd?.status === 'eu_banned' ||
+                      limitVal === 0;
+                    const isExempt =
+                      ifraStd?.status === 'exempt_fcf' || ifraStd?.status === 'unrestricted';
+                    return (
+                      <div
+                        className={`mt-2.5 rounded-md border px-3 py-2 text-xs leading-relaxed ${
+                          isBanned
+                            ? 'border-[#FECACA] bg-[#FEF2F2] text-[#991B1B]'
+                            : isExempt
+                              ? 'border-[#BBF7D0] bg-[#F0FDF4] text-[#166534]'
+                              : 'border-[#E1DFDD] bg-white text-[#323130]'
+                        }`}
+                      >
+                        <div className="font-semibold flex items-center justify-between gap-2">
+                          <span>IFRA 51 (Cat. 4)</span>
+                          <span className="font-mono tabular-nums">
+                            {isBanned
+                              ? tr(language, {
+                                  ru: 'Запрещён (0%)',
+                                  en: 'Prohibited (0%)',
+                                  it: 'Vietato (0%)',
+                                  es: 'Prohibido (0%)',
+                                  de: 'Verboten (0%)',
+                                })
+                              : ifraStd?.status === 'exempt_fcf'
+                                ? tr(language, {
+                                    ru: 'FCF — без лимита 0.4%',
+                                    en: 'FCF — exempt',
+                                    it: 'FCF — esente',
+                                    es: 'FCF — exento',
+                                    de: 'FCF — befreit',
+                                  })
+                                : ifraStd?.status === 'unrestricted'
+                                  ? tr(language, {
+                                      ru: 'Не ограничен',
+                                      en: 'Unrestricted',
+                                      it: 'Non limitato',
+                                      es: 'Sin límite',
+                                      de: 'Nicht beschränkt',
+                                    })
+                                  : limitVal !== undefined
+                                    ? `≤ ${limitVal}%`
+                                    : ''}
+                          </span>
+                        </div>
+                      </div>
+                    );
+                  })()}
                 </div>
               </div>
 
@@ -1509,13 +2012,6 @@ export function IngredientLibrary({
                                     setEditingNoteText(note.text);
                                   }}
                                   className="rounded p-1 text-[#797775] hover:bg-[#F3F2F1] hover:text-[#181917]"
-                                  aria-label={tr(language, {
-                                    ru: 'Редактировать заметку',
-                                    en: 'Edit note',
-                                    it: 'Modifica nota',
-                                    es: 'Editar nota',
-                                    de: 'Notiz bearbeiten',
-                                  })}
                                 >
                                   <Pencil className="h-3 w-3" />
                                 </button>
@@ -1524,13 +2020,6 @@ export function IngredientLibrary({
                                 type="button"
                                 onClick={() => handleDeleteNote(note.id)}
                                 className="rounded p-1 text-[#797775] hover:bg-[#FEF2F2] hover:text-[#B91C1C]"
-                                aria-label={tr(language, {
-                                  ru: 'Удалить заметку',
-                                  en: 'Delete note',
-                                  it: 'Elimina nota',
-                                  es: 'Eliminar nota',
-                                  de: 'Notiz löschen',
-                                })}
                               >
                                 <Trash2 className="h-3 w-3" />
                               </button>
@@ -1589,22 +2078,13 @@ export function IngredientLibrary({
               <BookOpen className="h-8 w-8 mx-auto text-[#8A8886]" />
               <div className="text-sm font-semibold text-[#181917]">
                 {tr(language, {
-                  ru: 'Выберите или добавьте ингредиент',
-                  en: 'Select or add an ingredient',
+                  ru: 'Выберите или добавьте вещество',
+                  en: 'Select or add a material',
                   it: 'Seleziona o aggiungi un ingrediente',
                   es: 'Selecciona o añade un ingrediente',
                   de: 'Rohstoff auswählen oder hinzufügen',
                 })}
               </div>
-              <p className="text-xs text-[#605E5C] max-w-md mx-auto">
-                {tr(language, {
-                  ru: 'Нажмите на любой ингредиент слева, чтобы открыть свойства, описание аромата, оценки и заметки.',
-                  en: 'Click any material on the left to inspect its properties, scent profile, ratings, and personal notes.',
-                  it: 'Fai clic su un materiale a sinistra per vederne proprietà, profilo olfattivo, valutazioni e note.',
-                  es: 'Haz clic en cualquier material a la izquierda para ver sus propiedades, perfil, valoraciones y notas.',
-                  de: 'Wählen Sie links einen Rohstoff aus, um Eigenschaften, Duftprofil, Bewertungen und Notizen anzuzeigen.',
-                })}
-              </p>
             </div>
           )}
         </div>

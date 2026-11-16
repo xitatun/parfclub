@@ -282,7 +282,7 @@ const SEED_OVERRIDES: Record<ExtraLang, SeedOverrideBundle> = {
       'lib-bergamot': {
         name: 'Bergamotto di Calabria FCF',
         blotterLongevity: '1–2 ore',
-        properties: 'Alta volatilità. Solubile in etanolo 96% e oli. Il grado FCF (senza bergaptene) elimina il rischio di fototossicità; limite IFRA standard 0.4%. Conservare in frigo al buio.',
+        properties: 'Alta volatilità. Solubile in etanolo 96% e oli. Il grado FCF (senza bergaptene) è ESENTE dal limite fototossico IFRA dello 0.4% (valido solo per olio espresso classico). Conservare in frigo al buio.',
         scentDescription: 'Apertura agrumata frizzante e nitida con scorza amara nobile, sfumature di tè Earl Grey e lieve tocco floreale di neroli.',
         notes: {
           'libn-1': 'Lega benissimo aperture balsamiche e legnose; con Iso E Super risulta più brillante e pulito.',
@@ -292,7 +292,7 @@ const SEED_OVERRIDES: Record<ExtraLang, SeedOverrideBundle> = {
       'lib-iso-e': {
         name: 'Iso E Super (IFF)',
         blotterLongevity: '150–170 ore (6–7 giorni)',
-        properties: 'Crea un effetto "bozzolo vellutato" amplificando i materiali vicini. Uso tipico: 5–30% del concentrato (limite IFRA Cat 4 ~21.4%).',
+        properties: 'Crea un effetto "bozzolo vellutato" amplificando i materiali vicini. Uso tipico: 5–45% del concentrato (limite IFRA 51 Cat 4: 20.0% nel prodotto finito).',
         scentDescription: 'Legno di cedro trasparente e vellutato con note di carta asciutta, pelle calda e sottile ambra grigia minerale.',
         notes: { 'libn-3': 'Arrotonda nettamente gli spigoli del cedro dell’Atlante dopo 7–10 giorni di macerazione.' },
       },
@@ -527,7 +527,7 @@ const SEED_OVERRIDES: Record<ExtraLang, SeedOverrideBundle> = {
       'lib-bergamot': {
         name: 'Bergamota de Calabria FCF',
         blotterLongevity: '1–2 horas',
-        properties: 'Alta volatilidad. Soluble en etanol 96% y aceites. El grado FCF (sin bergapteno) elimina la fototoxicidad; límite IFRA estándar 0.4%. Guardar refrigerado en vidrio ámbar.',
+        properties: 'Alta volatilidad. Soluble en etanol 96% y aceites. El grado FCF (sin bergapteno) está EXENTO del límite fototóxico IFRA del 0.4% (aplicable solo al aceite prensado normal). Guardar refrigerado en vidrio ámbar.',
         scentDescription: 'Salida cítrica chispeante y nítida con piel amarga noble, matices de té Earl Grey y delicado toque floral tipo neroli.',
         notes: {
           'libn-1': 'Une muy bien salidas de pino y madera; junto a Iso E Super suena más limpia y luminosa.',
@@ -537,7 +537,7 @@ const SEED_OVERRIDES: Record<ExtraLang, SeedOverrideBundle> = {
       'lib-iso-e': {
         name: 'Iso E Super (IFF)',
         blotterLongevity: '150–170 horas (6–7 días)',
-        properties: 'Crea un "capullo aterciopelado" y amplifica materiales vecinos. Uso habitual: 5–30% del concentrado (límite IFRA Cat 4 ~21.4%).',
+        properties: 'Crea un "capullo aterciopelado" y amplifica materiales vecinos. Uso habitual: 5–45% del concentrado (límite IFRA 51 Cat 4: 20.0% en producto final).',
         scentDescription: 'Cedro transparente y aterciopelado con matices de papel seco, piel cálida y ámbar gris mineral sutil.',
         notes: { 'libn-3': 'Redondea visiblemente las aristas del cedro del Atlas tras 7–10 días de maceración.' },
       },
@@ -772,7 +772,7 @@ const SEED_OVERRIDES: Record<ExtraLang, SeedOverrideBundle> = {
       'lib-bergamot': {
         name: 'Kalabrische Bergamotte FCF',
         blotterLongevity: '1–2 Stunden',
-        properties: 'Hohe Flüchtigkeit. Gut löslich in Ethanol 96% und Trägerölen. FCF-Qualität (bergaptenfrei) vermeidet Phototoxizität; Standard-IFRA-Limit 0.4%. Gekühlt im Braunglas lagern.',
+        properties: 'Hohe Flüchtigkeit. Gut löslich in Ethanol 96% und Trägerölen. FCF-Qualität (bergaptenfrei) ist vom phototoxischen 0.4%-IFRA-Limit BEFREIT (gilt nur für kaltgepresstes Öl mit Bergapten). Gekühlt im Braunglas lagern.',
         scentDescription: 'Spritziger, klarer Zitrusauftakt mit edler bitterer Schale, Earl-Grey-Tee-Nuancen und zarter Neroli-Blütenfrische.',
         notes: {
           'libn-1': 'Verbindet Nadel- und Holzauftakte mühelos; wirkt mit Iso E Super heller und klarer.',
@@ -782,7 +782,7 @@ const SEED_OVERRIDES: Record<ExtraLang, SeedOverrideBundle> = {
       'lib-iso-e': {
         name: 'Iso E Super (IFF)',
         blotterLongevity: '150–170 Stunden (6–7 Tage)',
-        properties: 'Erzeugt einen "Samtkokon" und verstärkt benachbarte Stoffe. Übliche Dosierung: 5–30% des Konzentrats (IFRA Kat. 4 ~21.4%).',
+        properties: 'Erzeugt einen "Samtkokon" und verstärkt benachbarte Stoffe. Übliche Dosierung: 5–45% des Konzentrats (IFRA 51 Kat. 4 Limit: 20.0% im Endprodukt).',
         scentDescription: 'Transparentes, samtiges Zedernholz mit Nuancen von trockenem Papier, warmer Haut und feiner mineralischer Ambra.',
         notes: { 'libn-3': 'Rundet scharfe Kanten von Atlaszeder nach 7–10 Tagen Reifung deutlich ab.' },
       },

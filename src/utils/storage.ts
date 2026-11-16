@@ -7,6 +7,8 @@ import {
   getProjectStatusLabel,
   getSillageLabel,
 } from '../data/constants';
+import { FRATERWORKS_REFERENCE_MATERIALS } from '../data/fraterworksProfiles';
+import { resolveIfraStandard } from '../data/ifraStandards';
 import { tr } from '../data/i18n';
 import { getSeedSnapshotForLanguage } from '../data/seedTranslations';
 import type {
@@ -65,6 +67,17 @@ function safeParse<T>(raw: string | null, fallback: T): T {
   }
 }
 
+const STALE_SEED_IFRA_VALUES: Record<string, number> = {
+  'ing-bergamot': 0.4,
+  'ing-iso-e': 21.4,
+  'ing-ambroxan': 15.0,
+  'ing-cedar-atlas': 25.0,
+  'ing-galaxolide': 30.0,
+  'ing-pink-pepper': 6.0,
+  'ing-jasmine-sambac': 4.0,
+  'ing-galbanum': 5.0,
+};
+
 export function loadInitialData(language: AppLanguage = 'ru'): {
   projects: PerfumeProject[];
   ingredients: Ingredient[];
@@ -111,26 +124,163 @@ export function loadInitialData(language: AppLanguage = 'ru'): {
     'lib-osmanthus',
     'lib-vetiver',
   ]);
+  const seedLibraryById = new Map(seed.library.map((sl) => [sl.id, sl]));
   const loadedLibrary = (Array.isArray(library) ? library : seed.library).filter(
     (item) => !item.id.startsWith('fc-') && !OLD_REMOVED_LIB_IDS.has(item.id)
   );
   const normalizedLibrary = loadedLibrary.map((item) => {
-    if (item.blotterLongevity !== undefined) return item;
-    const seedMatch = seed.library.find((sl) => sl.id === item.id);
-    return seedMatch?.blotterLongevity
-      ? { ...item, blotterLongevity: seedMatch.blotterLongevity }
-      : item;
+    const seedMatch = seedLibraryById.get(item.id);
+    const std = resolveIfraStandard({
+      name: item.name,
+      inciOrCas: item.inciOrCas,
+      synonyms: item.synonyms,
+    });
+
+    if (seedMatch && item.id.startsWith('src3-')) {
+      const hasStaleRecText =
+        typeof item.properties === 'string' &&
+        (/\. Рекомендация:/i.test(item.properties) ||
+          /IFRA 51 Cat\. 4: не ограничен \(/i.test(item.properties) ||
+          /Рекомендуемый\s+ввод\s*:/i.test(item.properties));
+      return {
+        ...item,
+        tier: seedMatch.tier,
+        blotterLongevity: item.blotterLongevity ?? seedMatch.blotterLongevity,
+        ifraLimitPercent: seedMatch.ifraLimitPercent,
+        ifraNote: undefined,
+        properties:
+          hasStaleRecText || item.updatedAt === '2026-11-14' || !item.updatedAt
+            ? seedMatch.properties
+            : item.properties,
+      };
+    }
+
+    if (std) {
+      const cleanedProps =
+        typeof item.properties === 'string'
+          ? item.properties.replace(/\s*Рекомендуемый\s+ввод\s*:[^.]*(?:\.|$)/gi, '').trim()
+          : item.properties;
+      return {
+        ...item,
+        tier: std.id === 'ifra-unres-dpg' ? 'solvent' : item.tier,
+        blotterLongevity: item.blotterLongevity ?? seedMatch?.blotterLongevity,
+        ifraLimitPercent:
+          std.status === 'exempt_fcf' || std.status === 'unrestricted'
+            ? undefined
+            : std.category4LimitPercent,
+        ifraNote: undefined,
+        properties: cleanedProps,
+      };
+    }
+
+    const cleanedItem = item.ifraNote ? { ...item, ifraNote: undefined } : item;
+    return cleanedItem.blotterLongevity === undefined && seedMatch?.blotterLongevity
+      ? { ...cleanedItem, blotterLongevity: seedMatch.blotterLongevity }
+      : cleanedItem;
   });
   const existingLibIds = new Set(normalizedLibrary.map((item) => item.id));
   const missingSeedLib = seed.library.filter((sl) => !existingLibIds.has(sl.id));
-  const mergedLibrary =
+  const baseMergedLibrary =
     missingSeedLib.length > 0 ? [...normalizedLibrary, ...missingSeedLib] : normalizedLibrary;
+
+  const existingCasSet = new Set(
+    baseMergedLibrary.map((item) => (item.inciOrCas || '').trim().toLowerCase()).filter(Boolean)
+  );
+  const existingIdSet = new Set(baseMergedLibrary.map((item) => item.id));
+  const fraterworksLibItems: LibraryIngredient[] = FRATERWORKS_REFERENCE_MATERIALS.filter(
+    (fw) =>
+      !existingIdSet.has(fw.id) &&
+      (!fw.inciOrCas || !existingCasSet.has(fw.inciOrCas.trim().toLowerCase()))
+  ).map((fw) => {
+    const std = resolveIfraStandard({
+      name: fw.name,
+      inciOrCas: fw.inciOrCas,
+      synonyms: fw.synonyms,
+    });
+    const ifraLimit =
+      std
+        ? std.status === 'exempt_fcf' || std.status === 'unrestricted'
+          ? undefined
+          : std.category4LimitPercent
+        : fw.ifraLimitPercent;
+    const ifraSuffix =
+      ifraLimit !== undefined
+        ? ` IFRA 51 Cat. 4: до ${ifraLimit}%.`
+        : std?.status === 'exempt_fcf'
+          ? ' IFRA 51 Cat. 4: FCF (не ограничен).'
+          : std?.status === 'unrestricted'
+            ? ' IFRA 51 Cat. 4: не ограничен.'
+            : '';
+    return {
+      id: fw.id,
+      name: fw.name,
+      inciOrCas: fw.inciOrCas,
+      synonyms: fw.synonyms,
+      family: fw.family,
+      tier: fw.tier,
+      origin: fw.origin,
+      blotterLongevity: `${fw.substantivityHours} ч`,
+      odorImpact: fw.odorImpact,
+      substantivityHours: fw.substantivityHours,
+      averageUsePercent: fw.averageUsePercent,
+      scentBreakdown: fw.scentBreakdown,
+      ifraLimitPercent: ifraLimit,
+      properties: `Летучесть: ${fw.volatilityLabel}.${ifraSuffix}`,
+      scentDescription: fw.scentDescription,
+      scentRating: 9,
+      futureIdeasRating: 9,
+      notes: [],
+      createdAt: '2026-01-15',
+      updatedAt: '2026-01-15',
+    };
+  });
+  const mergedLibrary =
+    fraterworksLibItems.length > 0
+      ? [...fraterworksLibItems, ...baseMergedLibrary]
+      : baseMergedLibrary;
 
   const loadedIngredients = Array.isArray(ingredients) ? ingredients : seed.ingredients;
   const normalizedIngredients = loadedIngredients.map((ing) => {
-    if (ing.tags !== undefined) return ing;
     const seedMatch = seed.ingredients.find((si) => si.id === ing.id);
-    return seedMatch?.tags ? { ...ing, tags: [...seedMatch.tags] } : ing;
+    const std = resolveIfraStandard({
+      name: ing.name,
+      inciOrCas: ing.inciOrCas,
+      synonyms: ing.synonyms,
+    });
+
+    let nextIfra = ing.ifraLimitPercent;
+    const staleVal = STALE_SEED_IFRA_VALUES[ing.id];
+    if (staleVal !== undefined && ing.ifraLimitPercent === staleVal) {
+      nextIfra = seedMatch?.ifraLimitPercent;
+    } else if (std) {
+      if (std.status === 'exempt_fcf' || std.status === 'unrestricted') {
+        if (
+          ing.ifraLimitPercent === 0.4 ||
+          ing.ifraLimitPercent === 15 ||
+          ing.ifraLimitPercent === 25 ||
+          ing.ifraLimitPercent === 30 ||
+          ing.ifraLimitPercent === 5 ||
+          ing.ifraLimitPercent === 0.2 ||
+          ing.ifraLimitPercent === 4.295
+        ) {
+          nextIfra = undefined;
+        }
+      } else if (std.category4LimitPercent !== undefined) {
+        if (
+          ing.ifraLimitPercent === undefined ||
+          ing.ifraLimitPercent === 21.4 ||
+          ing.ifraLimitPercent === 0.02
+        ) {
+          nextIfra = std.category4LimitPercent;
+        }
+      }
+    }
+
+    return {
+      ...ing,
+      tags: ing.tags !== undefined ? ing.tags : seedMatch?.tags ? [...seedMatch.tags] : ing.tags,
+      ifraLimitPercent: nextIfra,
+    };
   });
 
   return {

@@ -1,17 +1,15 @@
 import { History, Layers, Minus, Plus, Redo2, Undo2, X } from 'lucide-react';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { BudgetEstimate } from './components/BudgetEstimate';
 import { ConfirmModal } from './components/ConfirmModal';
 import { IngredientDilutionCalculator } from './components/IngredientDilutionCalculator';
 import { IngredientQuickSearchModal } from './components/IngredientQuickSearchModal';
 import { IngredientsCatalog } from './components/IngredientsCatalog';
 import { IngredientsFilterPane } from './components/IngredientsFilterPane';
-import {
-  PdfDocumentSheets,
-  type PdfExportJob,
-  type ProjectPdfSectionKey,
+import type {
+  PdfExportJob,
+  ProjectPdfSectionKey,
 } from './components/PdfDocumentSheets';
-import { PdfProjectPagesModal } from './components/PdfProjectPagesModal';
 import { OfflineIndicator } from './components/PWAInstallButton';
 import { ProjectDetail } from './components/ProjectDetail';
 import { ProjectHistoryPane } from './components/ProjectHistoryPane';
@@ -19,21 +17,36 @@ import { ProjectsOverview } from './components/ProjectsOverview';
 import { ProjectTabsBar } from './components/ProjectTabsBar';
 import { SalesStatistics } from './components/SalesStatistics';
 import { StudioStatistics } from './components/StudioStatistics';
-import { WordFileBackstage, type BackstageTab } from './components/WordFileBackstage';
+import type { CartAddPayload } from './components/SuggestedComponentsModal';
+import { type BackstageTab, WordFileBackstage } from './components/WordFileBackstage';
 import { WordRibbon } from './components/WordRibbon';
+
+const PdfDocumentSheets = lazy(() =>
+  import('./components/PdfDocumentSheets').then((m) => ({ default: m.PdfDocumentSheets }))
+);
+const PdfProjectPagesModal = lazy(() =>
+  import('./components/PdfProjectPagesModal').then((m) => ({ default: m.PdfProjectPagesModal }))
+);
 import {
   DEFAULT_APP_SETTINGS,
+  DEFAULT_BOTTLE_VOLUMES_ML,
   DEFAULT_HOME_SECTIONS,
   DEFAULT_INGREDIENT_FILTERS,
   DEFAULT_VIEW_SETTINGS,
   EMPTY_PROFILE,
 } from './data/constants';
 import { tr, UI_TEXT } from './data/i18n';
+import { resolveIfraStandard } from './data/ifraStandards';
+import {
+  buildScaledFormulaComponents,
+  type StarterFormulaSpec,
+} from './data/starterFormulasData';
 import { useUndoRedo } from './hooks/useUndoRedo';
 import type {
   AppLanguage,
   AppSection,
   AppSettings,
+  FormulaComponent,
   Ingredient,
   IngredientFilters,
   LibraryIngredient,
@@ -51,10 +64,6 @@ import {
   getMacerationStatus,
   isIngredientRunningLow,
 } from './utils/calculations';
-import { exportIngredientsToExcel } from './utils/excelExport';
-import { exportPdfHostSheets } from './utils/pdfDocumentExport';
-import { exportSalesToExcel } from './utils/salesExcel';
-import { createPrintScreenshotPages } from './utils/screenshotExport';
 import {
   buildBackupPayload,
   buildProjectWordHtml,
@@ -90,6 +99,7 @@ type ConfirmState =
   | { type: 'sale'; id: string; label: string }
   | { type: 'library'; id: string; label: string }
   | { type: 'reset_demo'; label: string }
+  | { type: 'clear_formula'; projectId: string; variantId: string | null; label: string }
   | null;
 
 interface AppText {
@@ -538,6 +548,21 @@ function readInitialAppSettings(): AppSettings {
           typeof parsed.criticalStockGrams === 'number' && parsed.criticalStockGrams > 0
             ? parsed.criticalStockGrams
             : DEFAULT_APP_SETTINGS.criticalStockGrams,
+        defaultConcentrateGrams:
+          typeof parsed.defaultConcentrateGrams === 'number' && parsed.defaultConcentrateGrams > 0
+            ? parsed.defaultConcentrateGrams
+            : DEFAULT_APP_SETTINGS.defaultConcentrateGrams,
+        bottleVolumesMl:
+          Array.isArray(parsed.bottleVolumesMl) &&
+          parsed.bottleVolumesMl.some((v) => typeof v === 'number' && Number.isFinite(v) && v > 0)
+            ? Array.from(
+                new Set(
+                  parsed.bottleVolumesMl
+                    .filter((v): v is number => typeof v === 'number' && Number.isFinite(v) && v > 0)
+                    .map((v) => Math.round(v))
+                )
+              ).sort((a, b) => a - b)
+            : DEFAULT_BOTTLE_VOLUMES_ML,
         homeSections: {
           ...DEFAULT_HOME_SECTIONS,
           ...(parsed.homeSections || {}),
@@ -619,6 +644,7 @@ export default function App() {
   const [activeSection, setActiveSection] = useState<AppSection>('projects');
   // Start on File -> Home backstage page
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
+  const [selectedVariantId, setSelectedVariantId] = useState<string | null>(null);
   const [activeProjectTab, setActiveProjectTab] = useState<ProjectTab>('formula');
   const [openProjectTabs, setOpenProjectTabs] = useState<string[]>(() => {
     try {
@@ -671,13 +697,100 @@ export default function App() {
   } | null>(null);
   const [isCapturingExport, setIsCapturingExport] = useState(false);
 
-  // Sync to localStorage & document theme attribute
-  useEffect(() => saveProjects(projects), [projects]);
-  useEffect(() => saveIngredients(ingredients), [ingredients]);
-  useEffect(() => saveEstimates(estimates), [estimates]);
-  useEffect(() => savePurchases(purchases), [purchases]);
-  useEffect(() => saveSales(sales), [sales]);
-  useEffect(() => saveLibrary(library), [library]);
+  // Sync to localStorage (debounced to avoid blocking typing/interactions) & flush on tab close
+  const latestStorageRef = useRef({
+    projects,
+    ingredients,
+    estimates,
+    purchases,
+    sales,
+    library,
+  });
+  latestStorageRef.current = {
+    projects,
+    ingredients,
+    estimates,
+    purchases,
+    sales,
+    library,
+  };
+  const dirtyStorageKeysRef = useRef<Set<keyof StudioSnapshot>>(new Set());
+
+  useEffect(() => {
+    dirtyStorageKeysRef.current.add('projects');
+    const timer = window.setTimeout(() => {
+      saveProjects(projects);
+      dirtyStorageKeysRef.current.delete('projects');
+    }, 350);
+    return () => window.clearTimeout(timer);
+  }, [projects]);
+
+  useEffect(() => {
+    dirtyStorageKeysRef.current.add('ingredients');
+    const timer = window.setTimeout(() => {
+      saveIngredients(ingredients);
+      dirtyStorageKeysRef.current.delete('ingredients');
+    }, 350);
+    return () => window.clearTimeout(timer);
+  }, [ingredients]);
+
+  useEffect(() => {
+    dirtyStorageKeysRef.current.add('estimates');
+    const timer = window.setTimeout(() => {
+      saveEstimates(estimates);
+      dirtyStorageKeysRef.current.delete('estimates');
+    }, 350);
+    return () => window.clearTimeout(timer);
+  }, [estimates]);
+
+  useEffect(() => {
+    dirtyStorageKeysRef.current.add('purchases');
+    const timer = window.setTimeout(() => {
+      savePurchases(purchases);
+      dirtyStorageKeysRef.current.delete('purchases');
+    }, 350);
+    return () => window.clearTimeout(timer);
+  }, [purchases]);
+
+  useEffect(() => {
+    dirtyStorageKeysRef.current.add('sales');
+    const timer = window.setTimeout(() => {
+      saveSales(sales);
+      dirtyStorageKeysRef.current.delete('sales');
+    }, 350);
+    return () => window.clearTimeout(timer);
+  }, [sales]);
+
+  useEffect(() => {
+    dirtyStorageKeysRef.current.add('library');
+    const timer = window.setTimeout(() => {
+      saveLibrary(library);
+      dirtyStorageKeysRef.current.delete('library');
+    }, 450);
+    return () => window.clearTimeout(timer);
+  }, [library]);
+
+  useEffect(() => {
+    const flushDirtyStorage = () => {
+      const dirty = dirtyStorageKeysRef.current;
+      if (dirty.size === 0) return;
+      const snap = latestStorageRef.current;
+      if (dirty.has('projects')) saveProjects(snap.projects);
+      if (dirty.has('ingredients')) saveIngredients(snap.ingredients);
+      if (dirty.has('estimates')) saveEstimates(snap.estimates);
+      if (dirty.has('purchases')) savePurchases(snap.purchases);
+      if (dirty.has('sales')) saveSales(snap.sales);
+      if (dirty.has('library')) saveLibrary(snap.library);
+      dirty.clear();
+    };
+    window.addEventListener('pagehide', flushDirtyStorage);
+    window.addEventListener('beforeunload', flushDirtyStorage);
+    return () => {
+      window.removeEventListener('pagehide', flushDirtyStorage);
+      window.removeEventListener('beforeunload', flushDirtyStorage);
+      flushDirtyStorage();
+    };
+  }, []);
   useEffect(() => {
     document.documentElement.dataset.theme = appSettings.themeColor;
     document.documentElement.dataset.colorMode = appSettings.colorMode;
@@ -846,6 +959,17 @@ export default function App() {
     () => projects.find((p) => p.id === selectedProjectId) || null,
     [projects, selectedProjectId]
   );
+
+  useEffect(() => {
+    setSelectedVariantId(null);
+  }, [selectedProjectId]);
+
+  useEffect(() => {
+    if (!selectedVariantId || !selectedProject) return;
+    if (!(selectedProject.variants || []).some((v) => v.id === selectedVariantId)) {
+      setSelectedVariantId(null);
+    }
+  }, [selectedProject, selectedVariantId]);
 
   const wishlistCount = useMemo(
     () => ingredients.filter((i) => i.status === 'wishlist').length,
@@ -1183,7 +1307,11 @@ export default function App() {
       code,
       status: 'idea',
       targetConcentration: 'EDP',
-      targetBottleMl: 30,
+      targetBottleMl:
+        appSettings.bottleVolumesMl?.includes(30)
+          ? 30
+          : appSettings.bottleVolumesMl?.[0] ?? 30,
+      targetConcentrateGrams: appSettings.defaultConcentrateGrams ?? 10,
       idea: '',
       inspiration: '',
       components: [],
@@ -1209,6 +1337,160 @@ export default function App() {
     }));
     openProjectInTab(newProj.id, 'formula');
     setToastMessage(t.createdProject(code));
+  };
+
+  const handleCreateProjectFromFormula = (
+    formula: StarterFormulaSpec,
+    targetConcentrateGrams: number,
+    includeSolvent: boolean
+  ) => {
+    const nextNumber = projects.length + 1;
+    const code = `AE-${String(nextNumber).padStart(2, '0')}`;
+    const today = todayIsoDate();
+    const lang = appSettings.language;
+    const components = buildScaledFormulaComponents(
+      formula,
+      targetConcentrateGrams,
+      includeSolvent,
+      ingredients,
+      lang
+    );
+
+    const buildMapNotes = (tier: 'top' | 'heart' | 'base') =>
+      components
+        .filter((c) => c.tier === tier)
+        .map((c) => ({
+          id: generateId('omn'),
+          name: c.name,
+          ingredientId: c.ingredientId,
+          percentage: Number(
+            (
+              (c.weightGrams /
+                Math.max(
+                  0.001,
+                  components.filter((x) => x.tier !== 'solvent').reduce((s, x) => s + x.weightGrams, 0)
+                )) *
+              100
+            ).toFixed(1)
+          ),
+          description: c.note || '',
+        }));
+
+    const newProj: PerfumeProject = {
+      id: generateId('proj'),
+      title: formula.title[lang],
+      code,
+      status: 'formulating',
+      targetConcentration: formula.targetConcentration,
+      targetBottleMl:
+        appSettings.bottleVolumesMl?.includes(30)
+          ? 30
+          : appSettings.bottleVolumesMl?.[0] ?? 30,
+      targetConcentrateGrams: Number(targetConcentrateGrams.toFixed(2)),
+      idea: formula.description[lang],
+      inspiration: `${formula.sourceDetail} · ${formula.studyTip[lang]}`,
+      components,
+      olfactoryMap: {
+        topNotes: buildMapNotes('top'),
+        heartNotes: buildMapNotes('heart'),
+        baseNotes: buildMapNotes('base'),
+        profile: { ...formula.profile },
+        longevityHours: formula.longevityHours,
+        sillageLevel: formula.sillageLevel,
+        evaporationNotes: formula.studyTip[lang],
+      },
+      journal: [],
+      macerations: [],
+      revisions: [],
+      packagingCostPerUnit: 300,
+      createdAt: today,
+      updatedAt: today,
+    };
+
+    commitStudio((prev) => ({
+      ...prev,
+      projects: [newProj, ...prev.projects],
+    }));
+    openProjectInTab(newProj.id, 'ingredients');
+    setToastMessage(
+      tr(lang, {
+        ru: `Создан проект ${code} из формулы «${formula.title[lang]}»`,
+        en: `Created project ${code} from "${formula.title[lang]}"`,
+        it: `Creato progetto ${code} da "${formula.title[lang]}"`,
+        es: `Creado proyecto ${code} desde "${formula.title[lang]}"`,
+        de: `Projekt ${code} aus „${formula.title[lang]}“ erstellt`,
+      })
+    );
+  };
+
+  const handleAppendFormulaToProject = (
+    formula: StarterFormulaSpec,
+    targetConcentrateGrams: number,
+    includeSolvent: boolean,
+    targetProjectId?: string
+  ) => {
+    const targetProject =
+      (targetProjectId ? projects.find((p) => p.id === targetProjectId) : null) ||
+      selectedProject ||
+      projects[0] ||
+      null;
+
+    if (!targetProject) {
+      handleCreateProjectFromFormula(formula, targetConcentrateGrams, includeSolvent);
+      return;
+    }
+
+    const lang = appSettings.language;
+    const isTargetSelected = selectedProject?.id === targetProject.id;
+    const activeVarId = isTargetSelected ? selectedVariantId : null;
+
+    const hasExistingSolvent = (
+      activeVarId
+        ? (targetProject.variants || []).find((v) => v.id === activeVarId)?.components ||
+          targetProject.components
+        : targetProject.components
+    ).some((c) => c.tier === 'solvent');
+
+    const scaled = buildScaledFormulaComponents(
+      formula,
+      targetConcentrateGrams,
+      includeSolvent && !hasExistingSolvent,
+      ingredients,
+      lang
+    );
+
+    commitStudio((prev) => ({
+      ...prev,
+      projects: prev.projects.map((p) => {
+        if (p.id !== targetProject.id) return p;
+        if (activeVarId && (p.variants || []).some((v) => v.id === activeVarId)) {
+          return {
+            ...p,
+            variants: (p.variants || []).map((v) =>
+              v.id === activeVarId
+                ? { ...v, components: [...v.components, ...scaled] }
+                : v
+            ),
+            updatedAt: todayIsoDate(),
+          };
+        }
+        return {
+          ...p,
+          components: [...p.components, ...scaled],
+          updatedAt: todayIsoDate(),
+        };
+      }),
+    }));
+    openProjectInTab(targetProject.id, 'ingredients');
+    setToastMessage(
+      tr(lang, {
+        ru: `«${formula.title[lang]}» добавлено в проект ${targetProject.code}`,
+        en: `Added "${formula.title[lang]}" to ${targetProject.code}`,
+        it: `Aggiunto "${formula.title[lang]}" a ${targetProject.code}`,
+        es: `Añadido "${formula.title[lang]}" a ${targetProject.code}`,
+        de: `„${formula.title[lang]}“ zu ${targetProject.code} hinzugefügt`,
+      })
+    );
   };
 
   const handleDuplicateProject = (projectId: string) => {
@@ -1476,9 +1758,20 @@ export default function App() {
 
     const runExport = async () => {
       try {
-        await new Promise<void>((resolve) =>
-          requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
-        );
+        const [, { exportPdfHostSheets }] = await Promise.all([
+          import('./components/PdfDocumentSheets'),
+          import('./utils/pdfDocumentExport'),
+        ]);
+        if (cancelled) return;
+        for (let attempt = 0; attempt < 30; attempt++) {
+          await new Promise<void>((resolve) =>
+            requestAnimationFrame(() => requestAnimationFrame(() => resolve()))
+          );
+          if (cancelled) return;
+          if (pdfHostRef.current && pdfHostRef.current.childElementCount > 0) {
+            break;
+          }
+        }
         if (cancelled || !pdfHostRef.current) return;
         await exportPdfHostSheets(pdfHostRef.current, activePdfRequest.filename);
         if (!cancelled) {
@@ -1510,6 +1803,7 @@ export default function App() {
     }
     setIsCapturingExport(true);
     try {
+      const { createPrintScreenshotPages } = await import('./utils/screenshotExport');
       const { pages } = await createPrintScreenshotPages(target);
       if (pages.length === 0) {
         window.print();
@@ -1584,12 +1878,14 @@ export default function App() {
     void handleExportCurrentViewPdf();
   };
 
-  const handleExportIngredientsExcel = () => {
+  const handleExportIngredientsExcel = async () => {
+    const { exportIngredientsToExcel } = await import('./utils/excelExport');
     exportIngredientsToExcel(ingredients, appSettings.language, appSettings.currency);
     setToastMessage(t.exportedIngredientsExcel);
   };
 
-  const handleExportSalesExcel = () => {
+  const handleExportSalesExcel = async () => {
+    const { exportSalesToExcel } = await import('./utils/salesExcel');
     exportSalesToExcel(sales, projects, appSettings.language, appSettings.currency);
     setToastMessage(t.exportedSalesExcel);
   };
@@ -1818,6 +2114,36 @@ export default function App() {
       setActiveSection('projects');
       setSelectedProjectId(null);
       setToastMessage(t.demoResetDone);
+    } else if (confirmState.type === 'clear_formula') {
+      commitStudio((prev) => ({
+        ...prev,
+        projects: prev.projects.map((p) => {
+          if (p.id !== confirmState.projectId) return p;
+          if (confirmState.variantId) {
+            return {
+              ...p,
+              variants: (p.variants || []).map((v) =>
+                v.id === confirmState.variantId ? { ...v, components: [] } : v
+              ),
+              updatedAt: todayIsoDate(),
+            };
+          }
+          return {
+            ...p,
+            components: [],
+            updatedAt: todayIsoDate(),
+          };
+        }),
+      }));
+      setToastMessage(
+        tr(appSettings.language, {
+          ru: 'Все ингредиенты удалены из формулы (Ctrl+Z — отменить)',
+          en: 'All ingredients removed from formula (Ctrl+Z to undo)',
+          it: 'Tutti gli ingredienti rimossi dalla formula (Ctrl+Z per annullare)',
+          es: 'Todos los ingredientes eliminados (Ctrl+Z para deshacer)',
+          de: 'Alle Rohstoffe entfernt (Ctrl+Z zum Rückgängigmachen)',
+        })
+      );
     }
     setConfirmState(null);
   };
@@ -1894,6 +2220,13 @@ export default function App() {
   };
 
   const handleAddLibraryItemToWishlist = (item: LibraryIngredient) => {
+    const resolvedIfra = resolveIfraStandard({
+      name: item.name,
+      inciOrCas: item.inciOrCas,
+    });
+    const resolvedLimit = resolvedIfra
+      ? resolvedIfra.category4LimitPercent
+      : item.ifraLimitPercent;
     const newIng: Ingredient = {
       id: generateId('ing'),
       name: item.name,
@@ -1906,7 +2239,8 @@ export default function App() {
       unit: 'г',
       quantityGrams: 10,
       priceTotal: 0,
-      longevityLabel: '—',
+      ifraLimitPercent: resolvedLimit,
+      longevityLabel: item.blotterLongevity || '—',
       sillage: 'moderate',
       olfactoryNotes: item.scentDescription || item.properties || '',
       createdAt: todayIsoDate(),
@@ -1917,6 +2251,140 @@ export default function App() {
     }));
     setToastMessage(t.addedToWishlist(item.name));
   };
+
+  const syncOrderedToEstimates = useCallback(
+    (
+      targetIng: Ingredient,
+      currentEstimates: ProjectEstimateItem[]
+    ): { nextEstimates: ProjectEstimateItem[]; added: boolean } => {
+      if (targetIng.status !== 'ordered') return { nextEstimates: currentEstimates, added: false };
+      const targetName = targetIng.name.trim().toLowerCase();
+      const alreadyExists = currentEstimates.some(
+        (e) =>
+          (targetIng.id && e.ingredientId === targetIng.id) ||
+          e.ingredientName.trim().toLowerCase() === targetName
+      );
+      if (alreadyExists) return { nextEstimates: currentEstimates, added: false };
+
+      const unitPrice =
+        targetIng.quantityGrams > 0
+          ? Number((targetIng.priceTotal / targetIng.quantityGrams).toFixed(2))
+          : (targetIng.priceTotal || 0);
+
+      const newEstItem: ProjectEstimateItem = {
+        id: generateId('est'),
+        projectId: projects[0]?.id || 'general',
+        ingredientId: targetIng.id,
+        ingredientName: targetIng.name.trim(),
+        category: targetIng.tier === 'solvent' ? 'solvent' : 'raw_materials',
+        requiredQuantity: Math.max(1, targetIng.quantityGrams || 10),
+        unit: targetIng.unit || 'г',
+        estimatedUnitPrice: unitPrice,
+        notes: tr(appSettings.language, {
+          ru: 'Автоматически добавлено из статуса «Заказано»',
+          en: 'Automatically added from "Ordered" status',
+          it: 'Aggiunto automaticamente dallo stato "Ordinato"',
+          es: 'Añadido automáticamente desde el estado "Pedido"',
+          de: 'Automatisch aus dem Status „Bestellt“ hinzugefügt',
+        }),
+      };
+
+      return { nextEstimates: [...currentEstimates, newEstItem], added: true };
+    },
+    [projects, appSettings.language]
+  );
+
+  const handleAddToShoppingCart = useCallback(
+    (payload: CartAddPayload, projectId?: string) => {
+      const targetName = payload.name.trim();
+      if (!targetName) return;
+      const nameLower = targetName.toLowerCase();
+
+      commitStudio((prev) => {
+        const existingIng = prev.ingredients.find(
+          (i) =>
+            (payload.ingredientId && i.id === payload.ingredientId) ||
+            i.name.trim().toLowerCase() === nameLower
+        );
+
+        let nextIngredients = prev.ingredients;
+        let linkedIngId = existingIng?.id;
+
+        if (!existingIng) {
+          const newIngId = generateId('ing');
+          linkedIngId = newIngId;
+          const resolvedIfra = resolveIfraStandard({
+            name: targetName,
+            inciOrCas: payload.inciOrCas,
+          });
+          const wishlistIng: Ingredient = {
+            id: newIngId,
+            name: targetName,
+            inciOrCas: payload.inciOrCas,
+            family: payload.family,
+            tier: payload.tier,
+            origin: payload.origin,
+            status: 'wishlist',
+            dilutionPercent: payload.dilutionPercent ?? 100,
+            unit: 'г',
+            quantityGrams: Math.max(10, Math.ceil(payload.requiredGrams || 10)),
+            priceTotal: 0,
+            ifraLimitPercent: resolvedIfra?.category4LimitPercent,
+            longevityLabel: '—',
+            sillage: 'moderate',
+            odorImpact: payload.odorImpact,
+            substantivityHours: payload.substantivityHours,
+            scentBreakdown: payload.scentBreakdown,
+            olfactoryNotes: payload.olfactoryNotes || '',
+            createdAt: todayIsoDate(),
+          };
+          nextIngredients = [wishlistIng, ...prev.ingredients];
+        }
+
+        let nextEstimates = prev.estimates;
+        if (projectId) {
+          const qtyToBuy = Math.max(1, Number((payload.requiredGrams || 10).toFixed(2)));
+          const existingEst = prev.estimates.find(
+            (e) =>
+              e.projectId === projectId &&
+              ((linkedIngId && e.ingredientId === linkedIngId) ||
+                e.ingredientName.trim().toLowerCase() === nameLower)
+          );
+          if (!existingEst) {
+            const newEst: ProjectEstimateItem = {
+              id: generateId('est'),
+              projectId,
+              ingredientId: linkedIngId,
+              ingredientName: targetName,
+              category: payload.tier === 'solvent' ? 'solvent' : 'raw_materials',
+              requiredQuantity: qtyToBuy,
+              unit: 'г',
+              estimatedUnitPrice: Number((payload.costPerGram || 0).toFixed(2)),
+              notes: payload.inciOrCas || undefined,
+            };
+            nextEstimates = [...prev.estimates, newEst];
+          }
+        }
+
+        return {
+          ...prev,
+          ingredients: nextIngredients,
+          estimates: nextEstimates,
+        };
+      });
+
+      setToastMessage(
+        tr(appSettings.language, {
+          ru: `«${targetName}» добавлен в корзину`,
+          en: `"${targetName}" added to cart`,
+          it: `"${targetName}" aggiunto al carrello`,
+          es: `"${targetName}" añadido al carrito`,
+          de: `„${targetName}“ in den Warenkorb gelegt`,
+        })
+      );
+    },
+    [commitStudio, appSettings.language]
+  );
 
   const handleOpenIngredientFromQuickSearch = useCallback(
     (ing: Ingredient) => {
@@ -1940,13 +2408,16 @@ export default function App() {
       const unitCost = ing.quantityGrams > 0 ? ing.priceTotal / ing.quantityGrams : 0;
       const newComp = {
         id: generateId('fc'),
-        ingredientId: ing.id,
+        ingredientId: ingredients.some((i) => i.id === ing.id) ? ing.id : undefined,
         name: ing.name,
         tier: ing.tier,
         family: ing.family,
         dilutionPercent: ing.dilutionPercent,
         weightGrams: Math.max(0.01, Number(weightGrams) || 0.5),
         costPerGram: Number(unitCost.toFixed(2)),
+        odorImpact: ing.odorImpact,
+        substantivityHours: ing.substantivityHours,
+        scentBreakdown: ing.scentBreakdown,
         note: ing.olfactoryNotes ? ing.olfactoryNotes.slice(0, 80) : undefined,
       };
       commitStudio((prev) => ({
@@ -1966,7 +2437,7 @@ export default function App() {
       setQuickSearchOpen(false);
       setToastMessage(t.addedIngredientToFormula(ing.name, targetProject.code));
     },
-    [projects, commitStudio, openProjectInTab, t]
+    [projects, ingredients, commitStudio, openProjectInTab, t]
   );
 
   const handleOpenCriticalStock = useCallback(
@@ -2017,6 +2488,10 @@ export default function App() {
           setFileBackstageTab('home');
           setFileBackstageOpen(true);
         }}
+        onOpenBottleSettings={() => {
+          setFileBackstageTab('settings');
+          setFileBackstageOpen(true);
+        }}
         macerationReadyCount={macerationReadyCount}
         readyMacerations={readyMacerations}
         criticalStockItems={criticalStockItems}
@@ -2053,6 +2528,10 @@ export default function App() {
         onRedo={handleRedo}
         historyPaneOpen={projectHistoryPaneOpen}
         onToggleHistoryPane={() => setProjectHistoryPaneOpen((v) => !v)}
+        onOpenHistoryTab={(tab) => {
+          setProjectHistoryPaneTab(tab);
+          setProjectHistoryPaneOpen(true);
+        }}
         viewSettings={viewSettings}
         onChangeViewSettings={handleChangeViewSettings}
         onResetViewSettings={handleResetViewSettings}
@@ -2073,6 +2552,52 @@ export default function App() {
         toastMessage={toastMessage}
         onOpenQuickSearch={() => setQuickSearchOpen(true)}
         projectEstimatesCount={projectEstimatesCount}
+        ingredients={ingredients}
+        library={library}
+        estimates={estimates}
+        selectedVariantId={selectedVariantId}
+        onAddToCart={handleAddToShoppingCart}
+        onAddComponentToFormula={(comp: FormulaComponent) => {
+          if (!selectedProject) return;
+          commitStudio((prev) => ({
+            ...prev,
+            projects: prev.projects.map((p) => {
+              if (p.id !== selectedProject.id) return p;
+              if (selectedVariantId && (p.variants || []).some((v) => v.id === selectedVariantId)) {
+                return {
+                  ...p,
+                  variants: (p.variants || []).map((v) =>
+                    v.id === selectedVariantId
+                      ? { ...v, components: [...v.components, comp] }
+                      : v
+                  ),
+                  updatedAt: todayIsoDate(),
+                };
+              }
+              return {
+                ...p,
+                components: [...p.components, comp],
+                updatedAt: todayIsoDate(),
+              };
+            }),
+          }));
+          setToastMessage(t.addedIngredientToFormula(comp.name, selectedProject.code));
+        }}
+        onRequestClearAllComponents={() => {
+          if (!selectedProject) return;
+          const activeVar = selectedVariantId
+            ? (selectedProject.variants || []).find((v) => v.id === selectedVariantId)
+            : null;
+          const label = activeVar
+            ? `${selectedProject.title} (${activeVar.name})`
+            : selectedProject.title || t.fallbackThisProject;
+          setConfirmState({
+            type: 'clear_formula',
+            projectId: selectedProject.id,
+            variantId: activeVar ? activeVar.id : null,
+            label,
+          });
+        }}
       />
 
       {/* Browser-style Project Tabs Strip */}
@@ -2124,238 +2649,279 @@ export default function App() {
               />
             )}
 
-            {activeSection === 'projects' && selectedProject && (
-              <ProjectDetail
-                project={selectedProject}
-                allProjects={projects}
-                viewSettings={viewSettings}
-                language={appSettings.language}
-                currency={appSettings.currency}
-                onSwitchProject={(id) => openProjectInTab(id)}
-                activeTab={activeProjectTab}
-                onChangeTab={handleSelectProjectSubTab}
-                onUpdateProject={handleUpdateProject}
-                ingredients={ingredients}
-                library={library}
-                estimates={estimates}
-                purchases={purchases}
-                onAddEstimateItem={(item) => {
-                  commitStudio((prev) => ({
-                    ...prev,
-                    estimates: [...prev.estimates, item],
-                  }));
-                  setToastMessage(t.estimateItemAddedToProject);
-                }}
-                onDeleteEstimateItem={(id) => {
-                  const est = estimates.find((e) => e.id === id);
-                  setConfirmState({
-                    type: 'estimate',
-                    id,
-                    label: est?.ingredientName || t.fallbackBudgetItem,
-                  });
-                }}
-                onAddPurchaseRecord={(record) => {
-                  commitStudio((prev) => ({
-                    ...prev,
-                    purchases: [record, ...prev.purchases],
-                  }));
-                  setToastMessage(t.purchaseSaved);
-                }}
-                onSaveDilutedIngredient={(ing) => {
-                  commitStudio((prev) => ({
-                    ...prev,
-                    ingredients: [ing, ...prev.ingredients],
-                    library: ensureIngredientsInLibrary([ing], prev.library),
-                  }));
-                }}
-                onToast={setToastMessage}
-                onUpdateIngredient={(ing) => {
-                  commitStudio((prev) => ({
-                    ...prev,
-                    ingredients: prev.ingredients.map((i) => (i.id === ing.id ? ing : i)),
-                    library: ensureIngredientsInLibrary([ing], prev.library),
-                  }));
-                  setToastMessage(t.ingredientUpdated);
-                }}
-              />
-            )}
+              {activeSection === 'projects' && selectedProject && (
+                <ProjectDetail
+                  project={selectedProject}
+                  allProjects={projects}
+                  viewSettings={viewSettings}
+                  language={appSettings.language}
+                  currency={appSettings.currency}
+                  defaultConcentrateGrams={appSettings.defaultConcentrateGrams ?? 10}
+                  onSwitchProject={(id) => openProjectInTab(id)}
+                  activeTab={activeProjectTab}
+                  onChangeTab={handleSelectProjectSubTab}
+                  onUpdateProject={handleUpdateProject}
+                  selectedVariantId={selectedVariantId}
+                  onSelectVariantId={setSelectedVariantId}
+                  ingredients={ingredients}
+                  library={library}
+                  estimates={estimates}
+                  purchases={purchases}
+                  onAddEstimateItem={(item) => {
+                    commitStudio((prev) => ({
+                      ...prev,
+                      estimates: [...prev.estimates, item],
+                    }));
+                    setToastMessage(t.estimateItemAddedToProject);
+                  }}
+                  onDeleteEstimateItem={(id) => {
+                    const est = estimates.find((e) => e.id === id);
+                    setConfirmState({
+                      type: 'estimate',
+                      id,
+                      label: est?.ingredientName || t.fallbackBudgetItem,
+                    });
+                  }}
+                  onAddPurchaseRecord={(record) => {
+                    commitStudio((prev) => ({
+                      ...prev,
+                      purchases: [record, ...prev.purchases],
+                    }));
+                    setToastMessage(t.purchaseSaved);
+                  }}
+                  onSaveDilutedIngredient={(ing) => {
+                    commitStudio((prev) => ({
+                      ...prev,
+                      ingredients: [ing, ...prev.ingredients],
+                      library: ensureIngredientsInLibrary([ing], prev.library),
+                    }));
+                  }}
+                  onToast={setToastMessage}
+                  onAddToCart={handleAddToShoppingCart}
+                  onUpdateIngredient={(ing) => {
+                    commitStudio((prev) => ({
+                      ...prev,
+                      ingredients: prev.ingredients.map((i) => (i.id === ing.id ? ing : i)),
+                      library: ensureIngredientsInLibrary([ing], prev.library),
+                    }));
+                    setToastMessage(t.ingredientUpdated);
+                  }}
+                />
+              )}
 
-            {activeSection === 'ingredients' && (
-              <IngredientsCatalog
-                ingredients={ingredients}
-                filteredIngredients={filteredIngredients}
-                library={library}
-                projects={projects}
-                viewSettings={viewSettings}
-                language={appSettings.language}
-                currency={appSettings.currency}
-                filters={ingredientFilters}
-                onChangeFilters={handleChangeIngredientFilters}
-                onResetFilters={handleResetIngredientFilters}
-                activeFiltersCount={activeIngredientFiltersCount}
-                statusCounts={ingredientStatusCounts}
-                filterPaneOpen={ingredientFilterPaneOpen}
-                onToggleFilterPane={() => setIngredientFilterPaneOpen((v) => !v)}
-                onAddIngredient={(ing) => {
-                  commitStudio((prev) => ({
-                    ...prev,
-                    ingredients: [ing, ...prev.ingredients],
-                    library: ensureIngredientsInLibrary([ing], prev.library),
-                  }));
-                  setToastMessage(t.ingredientAdded(ing.name));
-                }}
-                onUpdateIngredient={(ing) => {
-                  commitStudio((prev) => ({
-                    ...prev,
-                    ingredients: prev.ingredients.map((i) => (i.id === ing.id ? ing : i)),
-                    library: ensureIngredientsInLibrary([ing], prev.library),
-                  }));
-                  setToastMessage(t.ingredientUpdated);
-                }}
-                onDeleteIngredient={(id) => {
-                  const ing = ingredients.find((i) => i.id === id);
-                  setConfirmState({
-                    type: 'ingredient',
-                    id,
-                    label: ing?.name || t.fallbackIngredient,
-                  });
-                }}
-                onAddPurchaseRecord={(record) => {
-                  commitStudio((prev) => ({
-                    ...prev,
-                    purchases: [record, ...prev.purchases],
-                  }));
-                  setToastMessage(t.movedToStockAndLogged);
-                }}
-                onAddEstimateItem={(item) => {
-                  commitStudio((prev) => ({
-                    ...prev,
-                    estimates: [...prev.estimates, item],
-                  }));
-                  setToastMessage(t.ingredientAddedToBudget);
-                }}
-                purchases={purchases}
-                priceFluctuationThreshold={priceFluctuationThreshold}
-                onChangePriceFluctuationThreshold={setPriceFluctuationThreshold}
-                availableTags={availableIngredientTags}
-                tagCounts={ingredientTagCounts}
-                onCreateTag={handleCreateIngredientTag}
-                onDeleteTag={handleDeleteIngredientTag}
-                criticalStockGrams={appSettings.criticalStockGrams}
-                onChangeCriticalStockGrams={(grams) =>
-                  setAppSettings((prev) => ({ ...prev, criticalStockGrams: grams }))
-                }
-              />
-            )}
+              {activeSection === 'ingredients' && (
+                <IngredientsCatalog
+                  ingredients={ingredients}
+                  filteredIngredients={filteredIngredients}
+                  library={library}
+                  projects={projects}
+                  viewSettings={viewSettings}
+                  language={appSettings.language}
+                  currency={appSettings.currency}
+                  filters={ingredientFilters}
+                  onChangeFilters={handleChangeIngredientFilters}
+                  onResetFilters={handleResetIngredientFilters}
+                  activeFiltersCount={activeIngredientFiltersCount}
+                  statusCounts={ingredientStatusCounts}
+                  filterPaneOpen={ingredientFilterPaneOpen}
+                  onToggleFilterPane={() => setIngredientFilterPaneOpen((v) => !v)}
+                  estimates={estimates}
+                  onAddIngredient={(ing) => {
+                    let wasAddedToEstimates = false;
+                    commitStudio((prev) => {
+                      const { nextEstimates, added } = syncOrderedToEstimates(ing, prev.estimates);
+                      wasAddedToEstimates = added;
+                      return {
+                        ...prev,
+                        ingredients: [ing, ...prev.ingredients],
+                        library: ensureIngredientsInLibrary([ing], prev.library),
+                        estimates: nextEstimates,
+                      };
+                    });
+                    if (wasAddedToEstimates) {
+                      setToastMessage(
+                        tr(appSettings.language, {
+                          ru: `«${ing.name}» заказан и автоматически добавлен в смету закупок`,
+                          en: `"${ing.name}" marked as ordered and added to procurement budget`,
+                          it: `"${ing.name}" ordinato e aggiunto automaticamente al budget`,
+                          es: `"${ing.name}" pedido y añadido automáticamente al presupuesto`,
+                          de: `„${ing.name}“ bestellt und automatisch zum Budget hinzugefügt`,
+                        })
+                      );
+                    } else {
+                      setToastMessage(t.ingredientAdded(ing.name));
+                    }
+                  }}
+                  onUpdateIngredient={(ing) => {
+                    let wasAddedToEstimates = false;
+                    commitStudio((prev) => {
+                      const { nextEstimates, added } = syncOrderedToEstimates(ing, prev.estimates);
+                      wasAddedToEstimates = added;
+                      return {
+                        ...prev,
+                        ingredients: prev.ingredients.map((i) => (i.id === ing.id ? ing : i)),
+                        library: ensureIngredientsInLibrary([ing], prev.library),
+                        estimates: nextEstimates,
+                      };
+                    });
+                    if (wasAddedToEstimates) {
+                      setToastMessage(
+                        tr(appSettings.language, {
+                          ru: `«${ing.name}» заказан и автоматически добавлен в смету закупок`,
+                          en: `"${ing.name}" marked as ordered and added to procurement budget`,
+                          it: `"${ing.name}" ordinato e aggiunto automaticamente al budget`,
+                          es: `"${ing.name}" pedido y añadido automáticamente al presupuesto`,
+                          de: `„${ing.name}“ bestellt und automatisch zum Budget hinzugefügt`,
+                        })
+                      );
+                    } else {
+                      setToastMessage(t.ingredientUpdated);
+                    }
+                  }}
+                  onDeleteIngredient={(id) => {
+                    const ing = ingredients.find((i) => i.id === id);
+                    setConfirmState({
+                      type: 'ingredient',
+                      id,
+                      label: ing?.name || t.fallbackIngredient,
+                    });
+                  }}
+                  onAddPurchaseRecord={(record) => {
+                    commitStudio((prev) => ({
+                      ...prev,
+                      purchases: [record, ...prev.purchases],
+                    }));
+                    setToastMessage(t.movedToStockAndLogged);
+                  }}
+                  onAddEstimateItem={(item) => {
+                    commitStudio((prev) => ({
+                      ...prev,
+                      estimates: [...prev.estimates, item],
+                    }));
+                    setToastMessage(t.ingredientAddedToBudget);
+                  }}
+                  purchases={purchases}
+                  priceFluctuationThreshold={priceFluctuationThreshold}
+                  onChangePriceFluctuationThreshold={setPriceFluctuationThreshold}
+                  availableTags={availableIngredientTags}
+                  tagCounts={ingredientTagCounts}
+                  onCreateTag={handleCreateIngredientTag}
+                  onDeleteTag={handleDeleteIngredientTag}
+                  criticalStockGrams={appSettings.criticalStockGrams}
+                  onChangeCriticalStockGrams={(grams) =>
+                    setAppSettings((prev) => ({ ...prev, criticalStockGrams: grams }))
+                  }
+                />
+              )}
 
-            {activeSection === 'budget' && (
-              <BudgetEstimate
-                projects={projects}
-                ingredients={ingredients}
-                estimates={estimates}
-                purchases={purchases}
-                viewSettings={viewSettings}
-                language={appSettings.language}
-                currency={appSettings.currency}
-                onAddEstimateItem={(item) => {
-                  commitStudio((prev) => ({
-                    ...prev,
-                    estimates: [...prev.estimates, item],
-                  }));
-                  setToastMessage(t.budgetItemAdded);
-                }}
-                onDeleteEstimateItem={(id) => {
-                  const est = estimates.find((e) => e.id === id);
-                  setConfirmState({
-                    type: 'estimate',
-                    id,
-                    label: est?.ingredientName || t.fallbackBudgetItem,
-                  });
-                }}
-                onAddPurchaseRecord={(record) => {
-                  commitStudio((prev) => ({
-                    ...prev,
-                    purchases: [record, ...prev.purchases],
-                  }));
-                  setToastMessage(t.purchaseLogged);
-                }}
-                onDeletePurchaseRecord={(id) => {
-                  const pur = purchases.find((p) => p.id === id);
-                  setConfirmState({
-                    type: 'purchase',
-                    id,
-                    label: pur?.ingredientName || t.fallbackPurchaseRecord,
-                  });
-                }}
-                onUpdateProject={handleUpdateProject}
-                onToast={setToastMessage}
-              />
-            )}
+              {activeSection === 'budget' && (
+                <BudgetEstimate
+                  projects={projects}
+                  ingredients={ingredients}
+                  estimates={estimates}
+                  purchases={purchases}
+                  viewSettings={viewSettings}
+                  language={appSettings.language}
+                  currency={appSettings.currency}
+                  onAddEstimateItem={(item) => {
+                    commitStudio((prev) => ({
+                      ...prev,
+                      estimates: [...prev.estimates, item],
+                    }));
+                    setToastMessage(t.budgetItemAdded);
+                  }}
+                  onDeleteEstimateItem={(id) => {
+                    const est = estimates.find((e) => e.id === id);
+                    setConfirmState({
+                      type: 'estimate',
+                      id,
+                      label: est?.ingredientName || t.fallbackBudgetItem,
+                    });
+                  }}
+                  onAddPurchaseRecord={(record) => {
+                    commitStudio((prev) => ({
+                      ...prev,
+                      purchases: [record, ...prev.purchases],
+                    }));
+                    setToastMessage(t.purchaseLogged);
+                  }}
+                  onDeletePurchaseRecord={(id) => {
+                    const pur = purchases.find((p) => p.id === id);
+                    setConfirmState({
+                      type: 'purchase',
+                      id,
+                      label: pur?.ingredientName || t.fallbackPurchaseRecord,
+                    });
+                  }}
+                  onUpdateProject={handleUpdateProject}
+                  onToast={setToastMessage}
+                />
+              )}
 
-            {activeSection === 'statistics' && (
-              <StudioStatistics
-                projects={projects}
-                ingredients={ingredients}
-                estimates={estimates}
-                purchases={purchases}
-                language={appSettings.language}
-                currency={appSettings.currency}
-                showDescription={viewSettings.showPageDescriptions}
-                onOpenProject={(projectId, tab = 'formula') => openProjectInTab(projectId, tab)}
-                onOpenIngredients={() => setActiveSection('ingredients')}
-                onOpenBudget={() => setActiveSection('budget')}
-                onOpenProjectsOverview={() => {
-                  setActiveSection('projects');
-                  setSelectedProjectId(null);
-                }}
-              />
-            )}
+              {activeSection === 'statistics' && (
+                <StudioStatistics
+                  projects={projects}
+                  ingredients={ingredients}
+                  estimates={estimates}
+                  purchases={purchases}
+                  language={appSettings.language}
+                  currency={appSettings.currency}
+                  showDescription={viewSettings.showPageDescriptions}
+                  onOpenProject={(projectId, tab = 'formula') => openProjectInTab(projectId, tab)}
+                  onOpenIngredients={() => setActiveSection('ingredients')}
+                  onOpenBudget={() => setActiveSection('budget')}
+                  onOpenProjectsOverview={() => {
+                    setActiveSection('projects');
+                    setSelectedProjectId(null);
+                  }}
+                />
+              )}
 
-            {activeSection === 'sales' && (
-              <SalesStatistics
-                projects={projects}
-                sales={sales}
-                language={appSettings.language}
-                currency={appSettings.currency}
-                showDescription={viewSettings.showPageDescriptions}
-                onAddSale={handleAddSale}
-                onImportSales={handleImportSales}
-                onDeleteSale={handleDeleteSale}
-                onOpenProject={(projectId, tab = 'formula') => openProjectInTab(projectId, tab)}
-              />
-            )}
+              {activeSection === 'sales' && (
+                <SalesStatistics
+                  projects={projects}
+                  sales={sales}
+                  language={appSettings.language}
+                  currency={appSettings.currency}
+                  showDescription={viewSettings.showPageDescriptions}
+                  onAddSale={handleAddSale}
+                  onImportSales={handleImportSales}
+                  onDeleteSale={handleDeleteSale}
+                  onOpenProject={(projectId, tab = 'formula') => openProjectInTab(projectId, tab)}
+                />
+              )}
 
-            {activeSection === 'dilution' && (
-              <IngredientDilutionCalculator
-                ingredients={ingredients}
-                projects={projects}
-                language={appSettings.language}
-                currency={appSettings.currency}
-                activeProject={selectedProject}
-                onAddToProjectFormula={(projectId, comp) => {
-                  commitStudio((prev) => ({
-                    ...prev,
-                    projects: prev.projects.map((p) =>
-                      p.id === projectId
-                        ? {
-                            ...p,
-                            components: [...p.components, comp],
-                            updatedAt: todayIsoDate(),
-                          }
-                        : p
-                    ),
-                  }));
-                }}
-                onSaveDilutedIngredient={(ing) => {
-                  commitStudio((prev) => ({
-                    ...prev,
-                    ingredients: [ing, ...prev.ingredients],
-                    library: ensureIngredientsInLibrary([ing], prev.library),
-                  }));
-                }}
-                onToast={setToastMessage}
-              />
-            )}
+              {activeSection === 'dilution' && (
+                <IngredientDilutionCalculator
+                  ingredients={ingredients}
+                  projects={projects}
+                  language={appSettings.language}
+                  currency={appSettings.currency}
+                  activeProject={selectedProject}
+                  onAddToProjectFormula={(projectId, comp) => {
+                    commitStudio((prev) => ({
+                      ...prev,
+                      projects: prev.projects.map((p) =>
+                        p.id === projectId
+                          ? {
+                              ...p,
+                              components: [...p.components, comp],
+                              updatedAt: todayIsoDate(),
+                            }
+                          : p
+                      ),
+                    }));
+                  }}
+                  onSaveDilutedIngredient={(ing) => {
+                    commitStudio((prev) => ({
+                      ...prev,
+                      ingredients: [ing, ...prev.ingredients],
+                      library: ensureIngredientsInLibrary([ing], prev.library),
+                    }));
+                  }}
+                  onToast={setToastMessage}
+                />
+              )}
           </div>
         </main>
 
@@ -2379,7 +2945,7 @@ export default function App() {
           />
         )}
 
-        {activeSection === 'projects' && selectedProject && (
+        {activeSection === 'projects' && selectedProject && projectHistoryPaneOpen && (
           <ProjectHistoryPane
             open={projectHistoryPaneOpen}
             onClose={() => setProjectHistoryPaneOpen(false)}
@@ -2803,228 +3369,291 @@ export default function App() {
         </footer>
       )}
 
-      <WordFileBackstage
-        open={fileBackstageOpen}
-        initialTab={fileBackstageTab}
-        onClose={() => setFileBackstageOpen(false)}
-        language={appSettings.language}
-        onChangeLanguage={(language) => {
-          setAppSettings((prev) => ({ ...prev, language }));
-          commitStudio((prev) => localizeSeedSnapshot(prev, language));
-          setToastMessage(APP_TEXT[language].languageSelected);
-        }}
-        currency={appSettings.currency}
-        onChangeCurrency={(currency) => {
-          setAppSettings((prev) => ({ ...prev, currency }));
-          setToastMessage(t.currencyUpdated(currency));
-        }}
-        themeColor={appSettings.themeColor}
-        onChangeThemeColor={(themeColor) => {
-          setAppSettings((prev) => ({ ...prev, themeColor }));
-          setToastMessage(t.themeColorUpdated);
-        }}
-        colorMode={appSettings.colorMode}
-        onChangeColorMode={handleChangeColorMode}
-        homeSections={appSettings.homeSections}
-        onChangeHomeSections={(patch) => {
-          setAppSettings((prev) => ({
-            ...prev,
-            homeSections: { ...prev.homeSections, ...patch },
-          }));
-        }}
-        criticalStockGrams={appSettings.criticalStockGrams}
-        onChangeCriticalStockGrams={(grams) =>
-          setAppSettings((prev) => ({ ...prev, criticalStockGrams: grams }))
-        }
-        lastBackupAt={appSettings.lastBackupAt}
-        selectedProject={selectedProject}
-        projects={projects}
-        ingredients={ingredients}
-        estimates={estimates}
-        purchases={purchases}
-        sales={sales}
-        library={library}
-        counts={{
-          projects: projects.length,
-          ingredients: ingredients.length,
-          estimates: estimates.length,
-          purchases: purchases.length,
-        }}
-        onAddLibraryItem={handleAddLibraryItem}
-        onUpdateLibraryItem={handleUpdateLibraryItem}
-        onDeleteLibraryItem={handleDeleteLibraryItem}
-        onAddLibraryItemToWishlist={handleAddLibraryItemToWishlist}
-        onAddSale={handleAddSale}
-        onImportSales={handleImportSales}
-        onDeleteSale={handleDeleteSale}
-        onOpenProjectsOverview={() => {
-          setActiveSection('projects');
-          setSelectedProjectId(null);
-        }}
-        onOpenProject={(projectId, tab = 'formula') => openProjectInTab(projectId, tab)}
-        onOpenIngredients={() => setActiveSection('ingredients')}
-        onOpenBudget={() => setActiveSection('budget')}
-        onAcknowledgeMaceration={handleAcknowledgeMaceration}
-        onAddMaceration={handleAddMaceration}
-        onDeleteMaceration={handleDeleteMaceration}
-        onCreateProject={handleCreateProject}
-        onDuplicateProject={() => {
-          if (selectedProject) handleDuplicateProject(selectedProject.id);
-        }}
-        onDeleteProject={() => {
-          if (selectedProject) requestDeleteProject(selectedProject.id);
-        }}
-        onOpenFile={handleOpenFile}
-        onSaveProjectJson={handleSaveCurrentProjectFile}
-        onExportProjectPdf={handleExportProjectPdf}
-        onExportProjectWordDoc={handleExportProjectWordDoc}
-        onExportIngredientsExcel={handleExportIngredientsExcel}
-        onExportSalesExcel={handleExportSalesExcel}
-        onCreateBackup={handleExportStudioBackup}
-        onRequestResetDemo={() =>
-          setConfirmState({
-            type: 'reset_demo',
-            label: t.resetDemoLabel,
-          })
-        }
-        onPrint={() => void handlePrintCurrentView()}
-        onExportCurrentViewPdf={() => handleExportCurrentViewPdf()}
-        isCapturingExport={isCapturingExport}
-        onOpenCriticalStock={handleOpenCriticalStock}
-        onOpenQuickSearch={() => setQuickSearchOpen(true)}
-        onTabChange={setFileBackstageTab}
-        onUpdateIngredient={(ing) => {
-          commitStudio((prev) => ({
-            ...prev,
-            ingredients: prev.ingredients.map((i) => (i.id === ing.id ? ing : i)),
-            library: ensureIngredientsInLibrary([ing], prev.library),
-          }));
-        }}
-        onAddEstimateItem={(item) => {
-          commitStudio((prev) => ({
-            ...prev,
-            estimates: [...prev.estimates, item],
-          }));
-          setToastMessage(t.budgetItemAdded);
-        }}
-        onDeleteEstimateItem={(id) => {
-          const est = estimates.find((e) => e.id === id);
-          setConfirmState({
-            type: 'estimate',
-            id,
-            label: est?.ingredientName || t.fallbackBudgetItem,
-          });
-        }}
-        onAddPurchaseRecord={(record) => {
-          commitStudio((prev) => ({
-            ...prev,
-            purchases: [record, ...prev.purchases],
-          }));
-          setToastMessage(t.purchaseLogged);
-        }}
-        onDeletePurchaseRecord={(id) => {
-          const pur = purchases.find((p) => p.id === id);
-          setConfirmState({
-            type: 'purchase',
-            id,
-            label: pur?.ingredientName || t.fallbackPurchaseRecord,
-          });
-        }}
-        onUpdateProject={handleUpdateProject}
-        onToast={setToastMessage}
-        studioName={appSettings.studioName}
-        onChangeStudioName={(studioName) =>
-          setAppSettings((prev) => ({ ...prev, studioName }))
-        }
-        renderIngredientsCatalog={() => (
-          <div className="flex flex-col lg:flex-row gap-4 items-start">
-            <div className="flex-1 min-w-0 w-full rounded-xl border border-[#E1DFDD] bg-white p-5 sm:p-6">
-              <IngredientsCatalog
-                ingredients={ingredients}
-                filteredIngredients={filteredIngredients}
-                library={library}
-                projects={projects}
-                viewSettings={viewSettings}
-                language={appSettings.language}
-                currency={appSettings.currency}
-                filters={ingredientFilters}
-                onChangeFilters={handleChangeIngredientFilters}
-                onResetFilters={handleResetIngredientFilters}
-                activeFiltersCount={activeIngredientFiltersCount}
-                statusCounts={ingredientStatusCounts}
-                filterPaneOpen={ingredientFilterPaneOpen}
-                onToggleFilterPane={() => setIngredientFilterPaneOpen((v) => !v)}
-                onAddIngredient={(ing) => {
-                  commitStudio((prev) => ({
-                    ...prev,
-                    ingredients: [ing, ...prev.ingredients],
-                    library: ensureIngredientsInLibrary([ing], prev.library),
-                  }));
-                  setToastMessage(t.ingredientAdded(ing.name));
-                }}
-                onUpdateIngredient={(ing) => {
-                  commitStudio((prev) => ({
-                    ...prev,
-                    ingredients: prev.ingredients.map((i) => (i.id === ing.id ? ing : i)),
-                    library: ensureIngredientsInLibrary([ing], prev.library),
-                  }));
-                  setToastMessage(t.ingredientUpdated);
-                }}
-                onDeleteIngredient={(id) => {
-                  const ing = ingredients.find((i) => i.id === id);
-                  setConfirmState({
-                    type: 'ingredient',
-                    id,
-                    label: ing?.name || t.fallbackIngredient,
-                  });
-                }}
-                onAddPurchaseRecord={(record) => {
-                  commitStudio((prev) => ({
-                    ...prev,
-                    purchases: [record, ...prev.purchases],
-                  }));
-                  setToastMessage(t.movedToStockAndLogged);
-                }}
-                onAddEstimateItem={(item) => {
-                  commitStudio((prev) => ({
-                    ...prev,
-                    estimates: [...prev.estimates, item],
-                  }));
-                  setToastMessage(t.ingredientAddedToBudget);
-                }}
-                purchases={purchases}
-                priceFluctuationThreshold={priceFluctuationThreshold}
-                onChangePriceFluctuationThreshold={setPriceFluctuationThreshold}
-                availableTags={availableIngredientTags}
-                tagCounts={ingredientTagCounts}
-                onCreateTag={handleCreateIngredientTag}
-                onDeleteTag={handleDeleteIngredientTag}
-                criticalStockGrams={appSettings.criticalStockGrams}
-                onChangeCriticalStockGrams={(grams) =>
-                  setAppSettings((prev) => ({ ...prev, criticalStockGrams: grams }))
-                }
-              />
-            </div>
-            <IngredientsFilterPane
-              open={ingredientFilterPaneOpen}
-              onClose={() => setIngredientFilterPaneOpen(false)}
-              filters={ingredientFilters}
-              onChangeFilters={handleChangeIngredientFilters}
-              onResetFilters={handleResetIngredientFilters}
-              activeFiltersCount={activeIngredientFiltersCount}
-              totalCount={ingredients.length}
-              filteredCount={filteredIngredients.length}
-              statusCounts={ingredientStatusCounts}
-              uniqueSuppliers={uniqueIngredientSuppliers}
-              availableTags={availableIngredientTags}
-              tagCounts={ingredientTagCounts}
-              onCreateTag={handleCreateIngredientTag}
-              criticalStockGrams={appSettings.criticalStockGrams}
-              language={appSettings.language}
-            />
-          </div>
-        )}
-      />
+      {fileBackstageOpen && (
+        <WordFileBackstage
+            open={fileBackstageOpen}
+            initialTab={fileBackstageTab}
+            onClose={() => setFileBackstageOpen(false)}
+            language={appSettings.language}
+            onChangeLanguage={(language) => {
+              setAppSettings((prev) => ({ ...prev, language }));
+              commitStudio((prev) => localizeSeedSnapshot(prev, language));
+              setToastMessage(APP_TEXT[language].languageSelected);
+            }}
+            currency={appSettings.currency}
+            onChangeCurrency={(currency) => {
+              setAppSettings((prev) => ({ ...prev, currency }));
+              setToastMessage(t.currencyUpdated(currency));
+            }}
+            themeColor={appSettings.themeColor}
+            onChangeThemeColor={(themeColor) => {
+              setAppSettings((prev) => ({ ...prev, themeColor }));
+              setToastMessage(t.themeColorUpdated);
+            }}
+            colorMode={appSettings.colorMode}
+            onChangeColorMode={handleChangeColorMode}
+            homeSections={appSettings.homeSections}
+            onChangeHomeSections={(patch) => {
+              setAppSettings((prev) => ({
+                ...prev,
+                homeSections: { ...prev.homeSections, ...patch },
+              }));
+            }}
+            criticalStockGrams={appSettings.criticalStockGrams}
+            onChangeCriticalStockGrams={(grams) =>
+              setAppSettings((prev) => ({ ...prev, criticalStockGrams: grams }))
+            }
+            defaultConcentrateGrams={appSettings.defaultConcentrateGrams ?? 10}
+            onChangeDefaultConcentrateGrams={(grams) =>
+              setAppSettings((prev) => ({ ...prev, defaultConcentrateGrams: grams }))
+            }
+            bottleVolumesMl={appSettings.bottleVolumesMl ?? DEFAULT_BOTTLE_VOLUMES_ML}
+            onChangeBottleVolumesMl={(volumes) =>
+              setAppSettings((prev) => ({ ...prev, bottleVolumesMl: volumes }))
+            }
+            lastBackupAt={appSettings.lastBackupAt}
+            selectedProject={selectedProject}
+            projects={projects}
+            ingredients={ingredients}
+            estimates={estimates}
+            purchases={purchases}
+            sales={sales}
+            library={library}
+            counts={{
+              projects: projects.length,
+              ingredients: ingredients.length,
+              estimates: estimates.length,
+              purchases: purchases.length,
+            }}
+            onAddLibraryItem={handleAddLibraryItem}
+            onUpdateLibraryItem={handleUpdateLibraryItem}
+            onDeleteLibraryItem={handleDeleteLibraryItem}
+            onAddLibraryItemToWishlist={handleAddLibraryItemToWishlist}
+            onAddSale={handleAddSale}
+            onImportSales={handleImportSales}
+            onDeleteSale={handleDeleteSale}
+            onOpenProjectsOverview={() => {
+              setActiveSection('projects');
+              setSelectedProjectId(null);
+            }}
+            onOpenProject={(projectId, tab = 'formula') => openProjectInTab(projectId, tab)}
+            onOpenIngredients={() => setActiveSection('ingredients')}
+            onOpenBudget={() => setActiveSection('budget')}
+            onAcknowledgeMaceration={handleAcknowledgeMaceration}
+            onAddMaceration={handleAddMaceration}
+            onDeleteMaceration={handleDeleteMaceration}
+            onCreateProject={handleCreateProject}
+            onDuplicateProject={() => {
+              if (selectedProject) handleDuplicateProject(selectedProject.id);
+            }}
+            onDeleteProject={() => {
+              if (selectedProject) requestDeleteProject(selectedProject.id);
+            }}
+            onOpenFile={handleOpenFile}
+            onSaveProjectJson={handleSaveCurrentProjectFile}
+            onExportProjectPdf={handleExportProjectPdf}
+            onExportProjectWordDoc={handleExportProjectWordDoc}
+            onExportIngredientsExcel={() => void handleExportIngredientsExcel()}
+            onExportSalesExcel={() => void handleExportSalesExcel()}
+            onCreateBackup={handleExportStudioBackup}
+            onRequestResetDemo={() =>
+              setConfirmState({
+                type: 'reset_demo',
+                label: t.resetDemoLabel,
+              })
+            }
+            onPrint={() => void handlePrintCurrentView()}
+            onExportCurrentViewPdf={() => handleExportCurrentViewPdf()}
+            isCapturingExport={isCapturingExport}
+            onOpenCriticalStock={handleOpenCriticalStock}
+            onOpenQuickSearch={() => setQuickSearchOpen(true)}
+            onTabChange={setFileBackstageTab}
+            onUpdateIngredient={(ing) => {
+              commitStudio((prev) => ({
+                ...prev,
+                ingredients: prev.ingredients.map((i) => (i.id === ing.id ? ing : i)),
+                library: ensureIngredientsInLibrary([ing], prev.library),
+              }));
+            }}
+            onAddEstimateItem={(item) => {
+              commitStudio((prev) => ({
+                ...prev,
+                estimates: [...prev.estimates, item],
+              }));
+              setToastMessage(t.budgetItemAdded);
+            }}
+            onDeleteEstimateItem={(id) => {
+              const est = estimates.find((e) => e.id === id);
+              setConfirmState({
+                type: 'estimate',
+                id,
+                label: est?.ingredientName || t.fallbackBudgetItem,
+              });
+            }}
+            onAddPurchaseRecord={(record) => {
+              commitStudio((prev) => ({
+                ...prev,
+                purchases: [record, ...prev.purchases],
+              }));
+              setToastMessage(t.purchaseLogged);
+            }}
+            onDeletePurchaseRecord={(id) => {
+              const pur = purchases.find((p) => p.id === id);
+              setConfirmState({
+                type: 'purchase',
+                id,
+                label: pur?.ingredientName || t.fallbackPurchaseRecord,
+              });
+            }}
+            onUpdateProject={handleUpdateProject}
+            onToast={setToastMessage}
+            onCreateProjectFromFormula={handleCreateProjectFromFormula}
+            onAppendFormulaToProject={handleAppendFormulaToProject}
+            onAddStarterIngredientToCart={(spec, neededGrams) => {
+              handleAddToShoppingCart(
+                {
+                  name: spec.name,
+                  family: spec.family,
+                  tier: spec.tier,
+                  origin: 'synthetic',
+                  dilutionPercent: spec.dilutionPercent,
+                  olfactoryNotes: spec.note[appSettings.language],
+                  requiredGrams: neededGrams,
+                },
+                selectedProject?.id
+              );
+            }}
+            studioName={appSettings.studioName}
+            onChangeStudioName={(studioName) =>
+              setAppSettings((prev) => ({ ...prev, studioName }))
+            }
+            renderIngredientsCatalog={() => (
+              <div className="flex flex-col lg:flex-row gap-4 items-start">
+                <div className="flex-1 min-w-0 w-full rounded-xl border border-[#E1DFDD] bg-white p-5 sm:p-6">
+                  <IngredientsCatalog
+                      ingredients={ingredients}
+                      filteredIngredients={filteredIngredients}
+                      library={library}
+                      projects={projects}
+                      viewSettings={viewSettings}
+                      language={appSettings.language}
+                      currency={appSettings.currency}
+                      filters={ingredientFilters}
+                      onChangeFilters={handleChangeIngredientFilters}
+                      onResetFilters={handleResetIngredientFilters}
+                      activeFiltersCount={activeIngredientFiltersCount}
+                      statusCounts={ingredientStatusCounts}
+                      filterPaneOpen={ingredientFilterPaneOpen}
+                      onToggleFilterPane={() => setIngredientFilterPaneOpen((v) => !v)}
+                      estimates={estimates}
+                      onAddIngredient={(ing) => {
+                        let wasAddedToEstimates = false;
+                        commitStudio((prev) => {
+                          const { nextEstimates, added } = syncOrderedToEstimates(ing, prev.estimates);
+                          wasAddedToEstimates = added;
+                          return {
+                            ...prev,
+                            ingredients: [ing, ...prev.ingredients],
+                            library: ensureIngredientsInLibrary([ing], prev.library),
+                            estimates: nextEstimates,
+                          };
+                        });
+                        if (wasAddedToEstimates) {
+                          setToastMessage(
+                            tr(appSettings.language, {
+                              ru: `«${ing.name}» заказан и автоматически добавлен в смету закупок`,
+                              en: `"${ing.name}" marked as ordered and added to procurement budget`,
+                              it: `"${ing.name}" ordinato e aggiunto automaticamente al budget`,
+                              es: `"${ing.name}" pedido y añadido automáticamente al presupuesto`,
+                              de: `„${ing.name}“ bestellt und automatisch zum Budget hinzugefügt`,
+                            })
+                          );
+                        } else {
+                          setToastMessage(t.ingredientAdded(ing.name));
+                        }
+                      }}
+                      onUpdateIngredient={(ing) => {
+                        let wasAddedToEstimates = false;
+                        commitStudio((prev) => {
+                          const { nextEstimates, added } = syncOrderedToEstimates(ing, prev.estimates);
+                          wasAddedToEstimates = added;
+                          return {
+                            ...prev,
+                            ingredients: prev.ingredients.map((i) => (i.id === ing.id ? ing : i)),
+                            library: ensureIngredientsInLibrary([ing], prev.library),
+                            estimates: nextEstimates,
+                          };
+                        });
+                        if (wasAddedToEstimates) {
+                          setToastMessage(
+                            tr(appSettings.language, {
+                              ru: `«${ing.name}» заказан и автоматически добавлен в смету закупок`,
+                              en: `"${ing.name}" marked as ordered and added to procurement budget`,
+                              it: `"${ing.name}" ordinato e aggiunto автоматически al budget`,
+                              es: `"${ing.name}" pedido y añadido automáticamente al presupuesto`,
+                              de: `„${ing.name}“ bestellt und автоматически zum Budget hinzugefügt`,
+                            })
+                          );
+                        } else {
+                          setToastMessage(t.ingredientUpdated);
+                        }
+                      }}
+                      onDeleteIngredient={(id) => {
+                        const ing = ingredients.find((i) => i.id === id);
+                        setConfirmState({
+                          type: 'ingredient',
+                          id,
+                          label: ing?.name || t.fallbackIngredient,
+                        });
+                      }}
+                      onAddPurchaseRecord={(record) => {
+                        commitStudio((prev) => ({
+                          ...prev,
+                          purchases: [record, ...prev.purchases],
+                        }));
+                        setToastMessage(t.movedToStockAndLogged);
+                      }}
+                      onAddEstimateItem={(item) => {
+                        commitStudio((prev) => ({
+                          ...prev,
+                          estimates: [...prev.estimates, item],
+                        }));
+                        setToastMessage(t.ingredientAddedToBudget);
+                      }}
+                      purchases={purchases}
+                      priceFluctuationThreshold={priceFluctuationThreshold}
+                      onChangePriceFluctuationThreshold={setPriceFluctuationThreshold}
+                      availableTags={availableIngredientTags}
+                      tagCounts={ingredientTagCounts}
+                      onCreateTag={handleCreateIngredientTag}
+                      onDeleteTag={handleDeleteIngredientTag}
+                      criticalStockGrams={appSettings.criticalStockGrams}
+                      onChangeCriticalStockGrams={(grams) =>
+                        setAppSettings((prev) => ({ ...prev, criticalStockGrams: grams }))
+                      }
+                    />
+                </div>
+                <IngredientsFilterPane
+                  open={ingredientFilterPaneOpen}
+                  onClose={() => setIngredientFilterPaneOpen(false)}
+                  filters={ingredientFilters}
+                  onChangeFilters={handleChangeIngredientFilters}
+                  onResetFilters={handleResetIngredientFilters}
+                  activeFiltersCount={activeIngredientFiltersCount}
+                  totalCount={ingredients.length}
+                  filteredCount={filteredIngredients.length}
+                  statusCounts={ingredientStatusCounts}
+                  uniqueSuppliers={uniqueIngredientSuppliers}
+                  availableTags={availableIngredientTags}
+                  tagCounts={ingredientTagCounts}
+                  onCreateTag={handleCreateIngredientTag}
+                  criticalStockGrams={appSettings.criticalStockGrams}
+                  language={appSettings.language}
+                />
+              </div>
+            )}
+          />
+      )}
 
       <ConfirmModal
         open={confirmState !== null}
@@ -3037,7 +3666,15 @@ export default function App() {
         description={
           confirmState?.type === 'reset_demo'
             ? t.confirmResetDesc
-            : t.confirmDeleteDesc(confirmState?.label || '')
+            : confirmState?.type === 'clear_formula'
+              ? tr(appSettings.language, {
+                  ru: `Удалить все ингредиенты из формулы «${confirmState.label}»? Действие можно отменить кнопкой «Отменить» (Ctrl+Z).`,
+                  en: `Remove all ingredients from formula "${confirmState.label}"? You can undo this with Undo (Ctrl+Z).`,
+                  it: `Rimuovere tutti gli ingredienti dalla formula "${confirmState.label}"? Puoi annullare con Ctrl+Z.`,
+                  es: `¿Eliminar todos los ingredientes de la fórmula "${confirmState.label}"? Puedes deshacer con Ctrl+Z.`,
+                  de: `Alle Rohstoffe aus der Formel „${confirmState.label}“ entfernen? Kann mit Strg+Z rückgängig gemacht werden.`,
+                })
+              : t.confirmDeleteDesc(confirmState?.label || '')
         }
         confirmLabel={
           confirmState?.type === 'reset_demo' ? t.resetBtn : t.deleteBtn
@@ -3047,25 +3684,40 @@ export default function App() {
         onConfirm={handleExecuteConfirm}
         onCancel={() => setConfirmState(null)}
       />
-      <PdfProjectPagesModal
-        open={pendingProjectPdf !== null}
-        project={pendingProjectPdf?.job.project ?? null}
-        estimates={estimates}
-        language={appSettings.language}
-        onConfirm={handleConfirmProjectPdfPages}
-        onCancel={() => setPendingProjectPdf(null)}
-      />
-      <IngredientQuickSearchModal
-        open={quickSearchOpen}
-        onClose={() => setQuickSearchOpen(false)}
-        ingredients={ingredients}
-        projects={projects}
-        selectedProjectId={selectedProjectId}
-        language={appSettings.language}
-        currency={appSettings.currency}
-        onSelectOpenInCatalog={handleOpenIngredientFromQuickSearch}
-        onAddToProjectFormula={handleAddIngredientToFormulaFromQuickSearch}
-      />
+      {pendingProjectPdf !== null && (
+        <Suspense fallback={null}>
+          <PdfProjectPagesModal
+            open={pendingProjectPdf !== null}
+            project={pendingProjectPdf?.job.project ?? null}
+            estimates={estimates}
+            language={appSettings.language}
+            onConfirm={handleConfirmProjectPdfPages}
+            onCancel={() => setPendingProjectPdf(null)}
+          />
+        </Suspense>
+      )}
+      {quickSearchOpen && (
+        <IngredientQuickSearchModal
+          open={quickSearchOpen}
+          onClose={() => setQuickSearchOpen(false)}
+          ingredients={ingredients}
+          library={library}
+          projects={projects}
+          selectedProjectId={selectedProjectId}
+          language={appSettings.language}
+          currency={appSettings.currency}
+          onSelectOpenInCatalog={handleOpenIngredientFromQuickSearch}
+          onAddToProjectFormula={handleAddIngredientToFormulaFromQuickSearch}
+          onAddMaterialToCatalog={(ing) => {
+            commitStudio((prev) => ({
+              ...prev,
+              ingredients: [ing, ...prev.ingredients],
+              library: ensureIngredientsInLibrary([ing], prev.library),
+            }));
+            setToastMessage(t.selectedIngredient(ing.name));
+          }}
+        />
+      )}
       <OfflineIndicator language={appSettings.language} />
 
       {/* Print-Only Screenshot Pages */}
@@ -3093,7 +3745,9 @@ export default function App() {
           aria-hidden="true"
           className="fixed -left-[99999px] top-0 pointer-events-none select-none bg-[#FFFFFF]"
         >
-          <PdfDocumentSheets job={activePdfRequest.job} />
+          <Suspense fallback={null}>
+            <PdfDocumentSheets job={activePdfRequest.job} />
+          </Suspense>
         </div>
       )}
     </div>

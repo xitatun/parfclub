@@ -1,5 +1,5 @@
 import { FileSpreadsheet, Plus, Search, Trash2, TrendingUp, Upload } from 'lucide-react';
-import { useMemo, useState } from 'react';
+import { lazy, Suspense, useMemo, useState } from 'react';
 import {
   formatUnit,
   getCurrencySymbol,
@@ -20,9 +20,11 @@ import {
   formatCurrencyRub,
   formatPercent,
 } from '../utils/calculations';
-import { exportSalesToExcel } from '../utils/salesExcel';
 import { generateId, todayIsoDate } from '../utils/storage';
-import { SalesExcelImportModal } from './SalesExcelImportModal';
+
+const SalesExcelImportModal = lazy(() =>
+  import('./SalesExcelImportModal').then((m) => ({ default: m.SalesExcelImportModal }))
+);
 import {
   formatSalesMonthLabels,
   type MonthlySalesTrendPoint,
@@ -776,14 +778,16 @@ export function SalesStatistics({
 
           <button
             type="button"
-            onClick={() =>
-              exportSalesToExcel(
-                hasActiveFilters ? filteredSales : sales,
-                projects,
-                language,
-                currency
-              )
-            }
+            onClick={() => {
+              void import('../utils/salesExcel').then(({ exportSalesToExcel }) => {
+                exportSalesToExcel(
+                  hasActiveFilters ? filteredSales : sales,
+                  projects,
+                  language,
+                  currency
+                );
+              });
+            }}
             className="inline-flex items-center gap-1.5 rounded-lg border border-[#107C41]/30 bg-[#ECFDF5] px-3 py-2 text-xs font-medium text-[#15803D] hover:bg-[#D1FAE5] whitespace-nowrap"
           >
             <FileSpreadsheet className="h-3.5 w-3.5" />
@@ -1352,15 +1356,19 @@ export function SalesStatistics({
         )}
       </section>
 
-      <SalesExcelImportModal
-        open={importModalOpen}
-        onClose={() => setImportModalOpen(false)}
-        projects={projects}
-        language={language}
-        currency={currency}
-        existingSalesCount={sales.length}
-        onImportSales={onImportSales}
-      />
+      {importModalOpen && (
+        <Suspense fallback={null}>
+          <SalesExcelImportModal
+            open={importModalOpen}
+            onClose={() => setImportModalOpen(false)}
+            projects={projects}
+            language={language}
+            currency={currency}
+            existingSalesCount={sales.length}
+            onImportSales={onImportSales}
+          />
+        </Suspense>
+      )}
     </div>
   );
 }

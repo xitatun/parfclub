@@ -1,4 +1,4 @@
-import { Layers, Radar as RadarIcon, Sparkles } from 'lucide-react';
+import { Activity, Clock, Flame, Layers, Radar as RadarIcon, Sparkles } from 'lucide-react';
 import { useMemo, useState } from 'react';
 import {
   PolarAngleAxis,
@@ -10,29 +10,41 @@ import {
   Tooltip,
 } from 'recharts';
 import {
+  FAMILY_HEX_MAP,
   OLFACTORY_FAMILIES,
   getNoteTierLabel,
   getNoteTierShort,
   getOlfactoryFamilyLabel,
   getOlfactoryFamilyShort,
 } from '../data/constants';
+import { resolveComponentPassport } from '../data/fraterworksProfiles';
 import { tr } from '../data/i18n';
 import type {
   AppLanguage,
   ConcentrationType,
   FormulaComponent,
+  Ingredient,
+  LibraryIngredient,
   NoteTier,
   OlfactoryFamilyKey,
 } from '../types/perfume';
-import { calculateFormulaSummary, formatGrams, formatPercent } from '../utils/calculations';
+import {
+  calculateFormulaSummary,
+  calculatePerceivedFormulaImpact,
+  formatGrams,
+  formatPercent,
+} from '../utils/calculations';
 
-type MetricMode = 'percent' | 'grams';
+type MetricMode = 'perceived' | 'percent' | 'grams';
 type AxisScope = 'all' | 'active';
 type BenchmarkKey = 'classic' | 'fresh' | 'oriental' | 'soliflore';
+type EvolutionStageKey = 'opening' | 'heart' | 'drydown';
 
 interface FormulaOlfactoryProfileRadarProps {
   components: FormulaComponent[];
   targetConcentration: ConcentrationType;
+  ingredients?: Ingredient[];
+  library?: LibraryIngredient[];
   language?: AppLanguage;
   onAddFirstComponent?: () => void;
 }
@@ -194,9 +206,9 @@ function FamilyLayerTooltip({
               {getNoteTierShort(row.key, language)}
             </span>
             <span className="font-mono tabular-nums text-[#181917]">
-              {metricMode === 'percent'
-                ? `${formatPercent(row.pct, 1)} · ${formatGrams(row.grams, 2, language)}`
-                : `${formatGrams(row.grams, 3, language)} · ${formatPercent(row.pct, 1)}`}
+              {metricMode === 'grams'
+                ? `${formatGrams(row.grams, 3, language)} · ${formatPercent(row.pct, 1)}`
+                : `${formatPercent(row.pct, 1)} · ${formatGrams(row.grams, 2, language)}`}
             </span>
           </div>
         ))}
@@ -268,11 +280,14 @@ function PyramidTooltip({
 export function FormulaOlfactoryProfileRadar({
   components,
   targetConcentration,
+  ingredients = [],
+  library = [],
   language = 'ru',
   onAddFirstComponent,
 }: FormulaOlfactoryProfileRadarProps) {
-  const [metricMode, setMetricMode] = useState<MetricMode>('percent');
+  const [metricMode, setMetricMode] = useState<MetricMode>('perceived');
   const [axisScope, setAxisScope] = useState<AxisScope>('all');
+  const [evolutionStage, setEvolutionStage] = useState<EvolutionStageKey>('heart');
   const [benchmarkKey, setBenchmarkKey] = useState<BenchmarkKey>(() =>
     getDefaultBenchmarkForConcentration(targetConcentration)
   );
@@ -283,6 +298,10 @@ export function FormulaOlfactoryProfileRadar({
   });
 
   const summary = useMemo(() => calculateFormulaSummary(components), [components]);
+  const perceivedAnalysis = useMemo(
+    () => calculatePerceivedFormulaImpact(components, ingredients, library),
+    [components, ingredients, library]
+  );
 
   const { familyEntries, activeCount, dominantByTier, topFamilies } = useMemo(() => {
     const map: Record<
@@ -291,7 +310,10 @@ export function FormulaOlfactoryProfileRadar({
         topGrams: number;
         heartGrams: number;
         baseGrams: number;
-        contributors: { name: string; pureMass: number }[];
+        topImpact: number;
+        heartImpact: number;
+        baseImpact: number;
+        contributors: { name: string; weight: number }[];
       }
     > = {} as Record<
       OlfactoryFamilyKey,
@@ -299,13 +321,26 @@ export function FormulaOlfactoryProfileRadar({
         topGrams: number;
         heartGrams: number;
         baseGrams: number;
-        contributors: { name: string; pureMass: number }[];
+        topImpact: number;
+        heartImpact: number;
+        baseImpact: number;
+        contributors: { name: string; weight: number }[];
       }
     >;
 
     for (const fam of OLFACTORY_FAMILIES) {
-      map[fam.key] = { topGrams: 0, heartGrams: 0, baseGrams: 0, contributors: [] };
+      map[fam.key] = {
+        topGrams: 0,
+        heartGrams: 0,
+        baseGrams: 0,
+        topImpact: 0,
+        heartImpact: 0,
+        baseImpact: 0,
+        contributors: [],
+      };
     }
+
+    let totalImpactUnits = 0;
 
     for (const comp of components) {
       if (comp.tier === 'solvent') continue;
@@ -314,38 +349,86 @@ export function FormulaOlfactoryProfileRadar({
       const pureMass = w * (dil / 100);
       if (pureMass <= 0) continue;
 
-      const bucket = map[comp.family];
-      if (!bucket) continue;
-      if (comp.tier === 'top') bucket.topGrams += pureMass;
-      if (comp.tier === 'heart') bucket.heartGrams += pureMass;
-      if (comp.tier === 'base') bucket.baseGrams += pureMass;
-      bucket.contributors.push({ name: comp.name, pureMass });
+      const passport = resolveComponentPassport(comp, ingredients, library);
+      const compImpact = pureMass * Math.max(10, passport.odorImpact);
+      totalImpactUnits += compImpact;
+
+      // Mass bucket goes to primary family
+      const primaryBucket = map[comp.family];
+      if (primaryBucket) {
+        if (comp.tier === 'top') primaryBucket.topGrams += pureMass;
+        if (comp.tier === 'heart') primaryBucket.heartGrams += pureMass;
+        if (comp.tier === 'base') primaryBucket.baseGrams += pureMass;
+      }
+
+      // Perceived impact distributes across Fraterworks multi-facet scentBreakdown
+      const breakdown = passport.scentBreakdown;
+      if (breakdown && breakdown.length > 0) {
+        const sumPct = breakdown.reduce((acc, f) => acc + f.percent, 0) || 100;
+        for (const facet of breakdown) {
+          const facetBucket = map[facet.family];
+          if (!facetBucket) continue;
+          const shareImpact = compImpact * (facet.percent / sumPct);
+          if (comp.tier === 'top') facetBucket.topImpact += shareImpact;
+          if (comp.tier === 'heart') facetBucket.heartImpact += shareImpact;
+          if (comp.tier === 'base') facetBucket.baseImpact += shareImpact;
+          facetBucket.contributors.push({
+            name: comp.name,
+            weight: metricMode === 'perceived' ? shareImpact : pureMass * (facet.percent / sumPct),
+          });
+        }
+      } else if (primaryBucket) {
+        if (comp.tier === 'top') primaryBucket.topImpact += compImpact;
+        if (comp.tier === 'heart') primaryBucket.heartImpact += compImpact;
+        if (comp.tier === 'base') primaryBucket.baseImpact += compImpact;
+        primaryBucket.contributors.push({ name: comp.name, weight: pureMass });
+      }
     }
 
     const totalPure = summary.pureAromaticGrams;
     const allEntries: TierFamilyEntry[] = OLFACTORY_FAMILIES.map((fam) => {
       const b = map[fam.key];
-      const topPct = totalPure > 0 ? (b.topGrams / totalPure) * 100 : 0;
-      const heartPct = totalPure > 0 ? (b.heartGrams / totalPure) * 100 : 0;
-      const basePct = totalPure > 0 ? (b.baseGrams / totalPure) * 100 : 0;
+      const topPct =
+        metricMode === 'perceived'
+          ? totalImpactUnits > 0
+            ? (b.topImpact / totalImpactUnits) * 100
+            : 0
+          : totalPure > 0
+            ? (b.topGrams / totalPure) * 100
+            : 0;
+      const heartPct =
+        metricMode === 'perceived'
+          ? totalImpactUnits > 0
+            ? (b.heartImpact / totalImpactUnits) * 100
+            : 0
+          : totalPure > 0
+            ? (b.heartGrams / totalPure) * 100
+            : 0;
+      const basePct =
+        metricMode === 'perceived'
+          ? totalImpactUnits > 0
+            ? (b.baseImpact / totalImpactUnits) * 100
+            : 0
+          : totalPure > 0
+            ? (b.baseGrams / totalPure) * 100
+            : 0;
       const totalGrams = b.topGrams + b.heartGrams + b.baseGrams;
       const totalPct = topPct + heartPct + basePct;
 
       const sortedNames = [...b.contributors]
-        .sort((a, c) => c.pureMass - a.pureMass)
+        .sort((a, c) => c.weight - a.weight)
         .map((c) => c.name);
 
       return {
         family: fam.key,
         label: getOlfactoryFamilyLabel(fam.key, language),
         shortLabel: getOlfactoryFamilyShort(fam.key, language),
-        top: metricMode === 'percent' ? Number(topPct.toFixed(2)) : Number(b.topGrams.toFixed(3)),
+        top: metricMode === 'grams' ? Number(b.topGrams.toFixed(3)) : Number(topPct.toFixed(2)),
         heart:
-          metricMode === 'percent' ? Number(heartPct.toFixed(2)) : Number(b.heartGrams.toFixed(3)),
-        base:
-          metricMode === 'percent' ? Number(basePct.toFixed(2)) : Number(b.baseGrams.toFixed(3)),
+          metricMode === 'grams' ? Number(b.heartGrams.toFixed(3)) : Number(heartPct.toFixed(2)),
+        base: metricMode === 'grams' ? Number(b.baseGrams.toFixed(3)) : Number(basePct.toFixed(2)),
         total:
-          metricMode === 'percent' ? Number(totalPct.toFixed(2)) : Number(totalGrams.toFixed(3)),
+          metricMode === 'grams' ? Number(totalGrams.toFixed(3)) : Number(totalPct.toFixed(2)),
         topGrams: b.topGrams,
         heartGrams: b.heartGrams,
         baseGrams: b.baseGrams,
@@ -361,7 +444,7 @@ export function FormulaOlfactoryProfileRadar({
     const topFamiliesList = [...active].sort((a, b) => b.totalPct - a.totalPct);
 
     const findDominant = (tier: 'top' | 'heart' | 'base'): TierFamilyEntry | null => {
-      const key = tier === 'top' ? 'topGrams' : tier === 'heart' ? 'heartGrams' : 'baseGrams';
+      const key = tier === 'top' ? 'topPct' : tier === 'heart' ? 'heartPct' : 'basePct';
       const sorted = [...active].filter((e) => e[key] > 0).sort((a, b) => b[key] - a[key]);
       return sorted[0] ?? null;
     };
@@ -376,7 +459,7 @@ export function FormulaOlfactoryProfileRadar({
       },
       topFamilies: topFamiliesList,
     };
-  }, [components, language, metricMode, summary.pureAromaticGrams]);
+  }, [components, ingredients, library, language, metricMode, summary.pureAromaticGrams]);
 
   const displayedFamilyData = useMemo(() => {
     if (axisScope === 'active' && activeCount >= 3) {
@@ -492,13 +575,21 @@ export function FormulaOlfactoryProfileRadar({
             </span>
           </h2>
           <p className="mt-0.5 text-xs text-[#6B6D68]">
-            {tr(language, {
-              ru: 'Автоматический радар по чистой массе ароматических компонентов формулы (верхние, средние и базовые ноты).',
-              en: 'Live radar derived from pure aromatic mass across top, heart, and base notes in the formula.',
-              it: 'Radar dinamico calcolato sulla massa aromatica pura tra note di testa, cuore e fondo.',
-              es: 'Radar dinámico basado en la masa aromática pura entre notas de salida, corazón y fondo.',
-              de: 'Live-Radar auf Basis der reinen Duftmasse über Kopf-, Herz- und Basisnoten.',
-            })}
+            {metricMode === 'perceived'
+              ? tr(language, {
+                  ru: 'Реальное ольфакторное звучание (Fraterworks-метод): учитывает ударную силу молекул (Odor Impact), их фасеты и летучесть, а не только процент по массе.',
+                  en: 'Perceived Scent Impact (Fraterworks method): weights materials by Odor Impact, multi-facet breakdown, and volatility rather than raw mass %.',
+                  it: 'Impatto olfattivo percepito (metodo Fraterworks): pondera per Odor Impact, sfaccettature e volatilità invece della sola massa.',
+                  es: 'Impacto olfativo percibido (método Fraterworks): pondera por Odor Impact, facetas y volatilidad en lugar del % en masa.',
+                  de: 'Wahrgenommener Duft-Impact (Fraterworks-Methode): gewichtet nach Odor Impact, Facetten und Flüchtigkeit statt reiner Masse.',
+                })
+              : tr(language, {
+                  ru: 'Автоматический радар по чистой массе ароматических компонентов формулы (верхние, средние и базовые ноты).',
+                  en: 'Live radar derived from pure aromatic mass across top, heart, and base notes in the formula.',
+                  it: 'Radar dinamico calcolato sulla massa aromatica pura tra note di testa, cuore e fondo.',
+                  es: 'Radar dinámico basado en la masa aromática pura entre notas de salida, corazón y fondo.',
+                  de: 'Live-Radar auf Basis der reinen Duftmasse über Kopf-, Herz- und Basisnoten.',
+                })}
           </p>
         </div>
 
@@ -506,6 +597,24 @@ export function FormulaOlfactoryProfileRadar({
           <div className="flex flex-wrap items-center gap-2">
             {/* Metric Mode Segmented Control */}
             <div className="inline-flex items-center rounded-lg bg-[#EEEEEC] p-0.5 text-xs">
+              <button
+                type="button"
+                onClick={() => setMetricMode('perceived')}
+                className={`inline-flex items-center gap-1 rounded-md px-2.5 py-1 font-medium transition-colors whitespace-nowrap ${
+                  metricMode === 'perceived'
+                    ? 'bg-white text-[var(--theme-accent)] shadow-xs'
+                    : 'text-[#575955] hover:text-[#181917]'
+                }`}
+              >
+                <Activity className="h-3.5 w-3.5" />
+                {tr(language, {
+                  ru: 'Реальное звучание %',
+                  en: 'Perceived Scent %',
+                  it: 'Odore percepito %',
+                  es: 'Olor percibido %',
+                  de: 'Duftwirkung %',
+                })}
+              </button>
               <button
                 type="button"
                 onClick={() => setMetricMode('percent')}
@@ -516,11 +625,11 @@ export function FormulaOlfactoryProfileRadar({
                 }`}
               >
                 {tr(language, {
-                  ru: '% концентрата',
-                  en: '% Concentrate',
-                  it: '% Concentrato',
-                  es: '% Concentrado',
-                  de: '% Konzentrat',
+                  ru: '% по массе',
+                  en: '% by Mass',
+                  it: '% in massa',
+                  es: '% en masa',
+                  de: '% Masse',
                 })}
               </button>
               <button
@@ -683,7 +792,7 @@ export function FormulaOlfactoryProfileRadar({
                     angle={90}
                     tick={{ fill: '#787A74', fontSize: 10 }}
                     tickFormatter={(val: number) =>
-                      metricMode === 'percent' ? `${Math.round(val)}%` : `${val}`
+                      metricMode === 'grams' ? `${val}` : `${Math.round(val)}%`
                     }
                     axisLine={false}
                   />
@@ -893,6 +1002,274 @@ export function FormulaOlfactoryProfileRadar({
                   <span>{characterAssessment}</span>
                 </div>
               )}
+            </div>
+          </div>
+
+          {/* Bottom Full-Width: Fraterworks-Style Perceived Scent Breakdown & Volatility Evolution */}
+          <div className="xl:col-span-12 border-t border-[#EAEAE6] pt-5 space-y-4">
+            <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+              <div>
+                <h3 className="text-xs font-semibold uppercase tracking-wider text-[#181917] flex items-center gap-1.5">
+                  <Flame className="h-3.5 w-3.5 text-[var(--theme-accent)]" />
+                  {tr(language, {
+                    ru: 'Fraterworks Scent Breakdown: Как формула пахнет на самом деле vs. По массе',
+                    en: 'Fraterworks Scent Breakdown: Actual Perceived Scent vs. Formula Mass %',
+                    it: 'Fraterworks Scent Breakdown: Odore Reale Percepito vs. % in Massa',
+                    es: 'Fraterworks Scent Breakdown: Olor Real Percibido vs. % en Masa',
+                    de: 'Fraterworks Scent Breakdown: Tatsächlicher Duft vs. Masse-%',
+                  })}
+                </h3>
+                <p className="text-[11px] text-[#6B6D68]">
+                  {tr(language, {
+                    ru: 'Сравнение физической доли веществ в стакане и реального ольфакторного баланса с учетом Odor Impact и летучести.',
+                    en: 'Compares physical weight in the beaker against actual perceived scent balance weighted by Odor Impact and volatility.',
+                    it: 'Confronta il peso fisico nel becher con il reale equilibrio olfattivo ponderato per Odor Impact e volatilità.',
+                    es: 'Compara el peso físico en el vaso con el equilibrio olfativo real ponderado por Odor Impact y volatilidad.',
+                    de: 'Vergleicht das physische Gewicht im Becherglas mit der tatsächlichen Duftwahrnehmung nach Odor Impact und Flüchtigkeit.',
+                  })}
+                </p>
+              </div>
+
+              <div className="inline-flex items-center gap-1.5 rounded-lg border border-[#E4E4E0] bg-[#FAFBF9] px-3 py-1.5 text-xs text-[#575955]">
+                <Clock className="h-3.5 w-3.5 text-[var(--theme-accent)]" />
+                <span>
+                  {tr(language, {
+                    ru: 'Ср. субстантивность на блоттере:',
+                    en: 'Avg. blotter substantivity:',
+                    it: 'Sostantività media su mouillette:',
+                    es: 'Sustantividad media en secante:',
+                    de: 'Mittlere Substantivität auf dem Riechstreifen:',
+                  })}
+                </span>
+                <strong className="font-mono text-[#181917]">
+                  ~{perceivedAnalysis.averageSubstantivityHours}{' '}
+                  {tr(language, { ru: 'ч', en: 'h', it: 'h', es: 'h', de: 'Std.' })}
+                </strong>
+              </div>
+            </div>
+
+            {/* Dual Comparison Bars: Perceived Scent vs Mass % */}
+            <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+              <div className="rounded-lg border border-[#E4E4E0] bg-[#FAFBF9] p-3.5 space-y-2">
+                <div className="flex items-center justify-between text-xs">
+                  <span className="font-semibold text-[#181917]">
+                    {tr(language, {
+                      ru: 'Реальное звучание (Perceived Scent Impact)',
+                      en: 'Actual Perceived Scent (Impact-Weighted)',
+                      it: 'Odore Percepito Reale (Impact-Weighted)',
+                      es: 'Olor Percibido Real (Impact-Weighted)',
+                      de: 'Tatsächliche Duftwahrnehmung (Impact)',
+                    })}
+                  </span>
+                  <span className="text-[11px] font-mono text-[var(--theme-accent)]">100%</span>
+                </div>
+                <div className="flex h-3.5 w-full overflow-hidden rounded-md bg-[#EAEAE6]">
+                  {OLFACTORY_FAMILIES.map((fam) => {
+                    const pct = perceivedAnalysis.perceivedFamilyProfile[fam.key] || 0;
+                    if (pct <= 0.5) return null;
+                    return (
+                      <div
+                        key={fam.key}
+                        style={{
+                          width: `${pct}%`,
+                          backgroundColor: FAMILY_HEX_MAP[fam.key],
+                        }}
+                        title={`${getOlfactoryFamilyLabel(fam.key, language)}: ${pct.toFixed(1)}%`}
+                        className="h-full transition-all first:rounded-l-md last:rounded-r-md"
+                      />
+                    );
+                  })}
+                </div>
+                <div className="flex flex-wrap gap-x-3 gap-y-1 pt-1 text-[11px] text-[#3F413D]">
+                  {OLFACTORY_FAMILIES.filter(
+                    (f) => (perceivedAnalysis.perceivedFamilyProfile[f.key] || 0) >= 2
+                  )
+                    .sort(
+                      (a, b) =>
+                        (perceivedAnalysis.perceivedFamilyProfile[b.key] || 0) -
+                        (perceivedAnalysis.perceivedFamilyProfile[a.key] || 0)
+                    )
+                    .slice(0, 5)
+                    .map((fam) => (
+                      <span key={fam.key} className="inline-flex items-center gap-1">
+                        <span
+                          className="h-2 w-2 rounded-full"
+                          style={{ backgroundColor: FAMILY_HEX_MAP[fam.key] }}
+                        />
+                        <span>{getOlfactoryFamilyShort(fam.key, language)}</span>
+                        <strong className="font-mono">
+                          {perceivedAnalysis.perceivedFamilyProfile[fam.key].toFixed(0)}%
+                        </strong>
+                      </span>
+                    ))}
+                </div>
+              </div>
+
+              <div className="rounded-lg border border-[#E4E4E0] bg-[#FAFBF9] p-3.5 space-y-2">
+                <div className="flex items-center justify-between text-xs">
+                  <span className="font-semibold text-[#575955]">
+                    {tr(language, {
+                      ru: 'Состав по массе в формуле (Raw Mass %)',
+                      en: 'Formula Composition by Weight (Raw Mass %)',
+                      it: 'Composizione in Peso nella Formula (Massa %)',
+                      es: 'Composición por Peso en Fórmula (Masa %)',
+                      de: 'Zusammensetzung nach Gewicht (Masse %)',
+                    })}
+                  </span>
+                  <span className="text-[11px] font-mono text-[#6B6D68]">100%</span>
+                </div>
+                <div className="flex h-3.5 w-full overflow-hidden rounded-md bg-[#EAEAE6] opacity-80">
+                  {OLFACTORY_FAMILIES.map((fam) => {
+                    const pct = perceivedAnalysis.massFamilyProfile[fam.key] || 0;
+                    if (pct <= 0.5) return null;
+                    return (
+                      <div
+                        key={fam.key}
+                        style={{
+                          width: `${pct}%`,
+                          backgroundColor: FAMILY_HEX_MAP[fam.key],
+                        }}
+                        title={`${getOlfactoryFamilyLabel(fam.key, language)}: ${pct.toFixed(1)}%`}
+                        className="h-full transition-all first:rounded-l-md last:rounded-r-md"
+                      />
+                    );
+                  })}
+                </div>
+                <div className="flex flex-wrap gap-x-3 gap-y-1 pt-1 text-[11px] text-[#575955]">
+                  {OLFACTORY_FAMILIES.filter(
+                    (f) => (perceivedAnalysis.massFamilyProfile[f.key] || 0) >= 2
+                  )
+                    .sort(
+                      (a, b) =>
+                        (perceivedAnalysis.massFamilyProfile[b.key] || 0) -
+                        (perceivedAnalysis.massFamilyProfile[a.key] || 0)
+                    )
+                    .slice(0, 5)
+                    .map((fam) => (
+                      <span key={fam.key} className="inline-flex items-center gap-1">
+                        <span
+                          className="h-2 w-2 rounded-full"
+                          style={{ backgroundColor: FAMILY_HEX_MAP[fam.key] }}
+                        />
+                        <span>{getOlfactoryFamilyShort(fam.key, language)}</span>
+                        <strong className="font-mono">
+                          {perceivedAnalysis.massFamilyProfile[fam.key].toFixed(0)}%
+                        </strong>
+                      </span>
+                    ))}
+                </div>
+              </div>
+            </div>
+
+            {/* Time-Stage Volatility Evolution (Opening / Heart / Drydown) */}
+            <div className="rounded-lg border border-[#E4E4E0] bg-white p-3.5 space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="text-xs font-semibold text-[#181917]">
+                  {tr(language, {
+                    ru: 'Прогноз раскрытия по фазам испарения (Volatility & Substantivity)',
+                    en: 'Evaporation Stage Projection (Volatility & Substantivity)',
+                    it: 'Proiezione Fasi di Evaporazione (Volatilità e Sostantività)',
+                    es: 'Proyección por Fases de Evaporación (Volatilidad y Sustantividad)',
+                    de: 'Duftverlauf nach Abdampfphasen (Flüchtigkeit & Substantivität)',
+                  })}
+                </div>
+                <div className="inline-flex items-center rounded-lg bg-[#EEEEEC] p-0.5 text-xs">
+                  {(
+                    [
+                      {
+                        key: 'opening' as const,
+                        label: tr(language, {
+                          ru: 'Старт (0–30 мин)',
+                          en: 'Opening (0–30m)',
+                          it: 'Apertura (0–30m)',
+                          es: 'Salida (0–30m)',
+                          de: 'Auftakt (0–30m)',
+                        }),
+                      },
+                      {
+                        key: 'heart' as const,
+                        label: tr(language, {
+                          ru: 'Сердце (2–6 ч)',
+                          en: 'Heart (2–6h)',
+                          it: 'Cuore (2–6h)',
+                          es: 'Corazón (2–6h)',
+                          de: 'Herz (2–6h)',
+                        }),
+                      },
+                      {
+                        key: 'drydown' as const,
+                        label: tr(language, {
+                          ru: 'Шлейф / База (12+ ч)',
+                          en: 'Drydown (12h+)',
+                          it: 'Fondo (12h+)',
+                          es: 'Secado (12h+)',
+                          de: 'Drydown (12h+)',
+                        }),
+                      },
+                    ] as const
+                  ).map((st) => (
+                    <button
+                      key={st.key}
+                      type="button"
+                      onClick={() => setEvolutionStage(st.key)}
+                      className={`rounded-md px-2.5 py-1 font-medium transition-colors ${
+                        evolutionStage === st.key
+                          ? 'bg-white text-[#181917] shadow-xs'
+                          : 'text-[#575955] hover:text-[#181917]'
+                      }`}
+                    >
+                      {st.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="flex h-2.5 w-full overflow-hidden rounded-full bg-[#EAEAE6]">
+                {OLFACTORY_FAMILIES.map((fam) => {
+                  const pct = perceivedAnalysis.stageProfiles[evolutionStage][fam.key] || 0;
+                  if (pct <= 0.5) return null;
+                  return (
+                    <div
+                      key={fam.key}
+                      style={{
+                        width: `${pct}%`,
+                        backgroundColor: FAMILY_HEX_MAP[fam.key],
+                      }}
+                      title={`${getOlfactoryFamilyLabel(fam.key, language)}: ${pct.toFixed(1)}%`}
+                      className="h-full transition-all"
+                    />
+                  );
+                })}
+              </div>
+
+              <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-[#575955]">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="font-medium text-[#181917]">
+                    {tr(language, {
+                      ru: 'Доминируют в этой фазе:',
+                      en: 'Dominant in this phase:',
+                      it: 'Dominanti in questa fase:',
+                      es: 'Dominantes en esta fase:',
+                      de: 'Dominant in dieser Phase:',
+                    })}
+                  </span>
+                  {perceivedAnalysis.stageDominantMaterials[evolutionStage].map((item) => (
+                    <span
+                      key={item.name}
+                      className="inline-flex items-center gap-1 rounded-md border border-[#E4E4E0] bg-[#FAFBF9] px-2 py-0.5 text-[11px] font-medium text-[#181917]"
+                    >
+                      <span
+                        className="h-2 w-2 rounded-full"
+                        style={{ backgroundColor: FAMILY_HEX_MAP[item.family] }}
+                      />
+                      <span>{item.name}</span>
+                      <span className="font-mono text-[var(--theme-accent)]">
+                        {item.sharePercent}%
+                      </span>
+                    </span>
+                  ))}
+                </div>
+              </div>
             </div>
           </div>
         </div>

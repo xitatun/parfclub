@@ -153,12 +153,25 @@ export function ProjectTabsBar({
     };
   }, [menuOpen]);
 
+  const getStatusDotColor = (status: PerfumeProject['status']) => {
+    switch (status) {
+      case 'completed':
+        return 'bg-[#107C41]';
+      case 'macerating':
+        return 'bg-[#D97706]';
+      case 'formulating':
+        return 'bg-[var(--theme-accent)]';
+      default:
+        return 'bg-[#8A8886]';
+    }
+  };
+
   if (openProjects.length === 0) {
     return null;
   }
 
   return (
-    <div className="print:hidden relative z-20 flex items-end gap-1 bg-[#F3F2F1] border-b border-[#D2D0CE] px-3 pt-1.5 select-none">
+    <div className="print:hidden relative z-20 flex items-end gap-1.5 bg-[#FAF9F8] border-t border-b border-[#E1DFDD] px-4 pt-1.5 select-none">
       <div
         role="tablist"
         aria-label={t.openTabsAria}
@@ -175,34 +188,36 @@ export function ProjectTabsBar({
                   onCloseTab(proj.id);
                 }
               }}
-              className={`group relative flex items-center shrink-0 rounded-t border transition-colors ${
+              className={`group relative flex items-center shrink-0 rounded-t-md border-t-2 border-x transition-colors ${
                 isActive
-                  ? 'bg-white text-[#181917] border-[#D2D0CE] border-b-0 z-10'
-                  : 'bg-[#FAF9F8] text-[#605E5C] border-transparent hover:bg-white hover:text-[#181917] hover:border-[#E1DFDD]'
+                  ? 'border-t-[var(--theme-accent)] border-x-[#E1DFDD] bg-white text-[#181917] -mb-px pb-[1px] z-10'
+                  : 'border-t-transparent border-x-transparent text-[#575955] hover:bg-white dark:hover:bg-[#2A2A27] hover:text-[#181917]'
               }`}
             >
-              {isActive && (
-                <span
-                  aria-hidden="true"
-                  className="absolute inset-x-0 top-0 h-[2px] rounded-t bg-[var(--theme-accent)] dark:bg-[var(--theme-accent-ink)]"
-                />
-              )}
               <button
                 type="button"
                 role="tab"
                 aria-selected={isActive}
                 onClick={() => onSelectTab(proj.id)}
                 title={`${proj.code} — ${proj.title}`}
-                className="flex items-center gap-1.5 pl-3 pr-1.5 py-1.5 text-[12px] text-left min-w-0"
+                className="flex items-center gap-2 pl-3 pr-1.5 py-1.5 text-xs text-left min-w-0"
               >
                 <span
+                  aria-hidden="true"
+                  className={`h-1.5 w-1.5 rounded-full shrink-0 ${getStatusDotColor(proj.status)}`}
+                />
+                <span
                   className={`font-mono text-[10.5px] font-semibold shrink-0 tabular-nums ${
-                    isActive ? 'text-[var(--theme-accent)]' : 'text-[#797775]'
+                    isActive ? 'text-[var(--theme-accent)]' : 'text-[#787A74]'
                   }`}
                 >
                   {proj.code}
                 </span>
-                <span className={`truncate max-w-[165px] ${isActive ? 'font-medium' : ''}`}>
+                <span
+                  className={`truncate max-w-[170px] ${
+                    isActive ? 'font-semibold text-[#181917]' : 'font-medium'
+                  }`}
+                >
                   {proj.title || t.untitled}
                 </span>
               </button>
@@ -213,8 +228,8 @@ export function ProjectTabsBar({
                 title={t.closeTab}
                 className={`mr-1.5 rounded p-0.5 transition-colors ${
                   isActive
-                    ? 'text-[#605E5C] hover:bg-[#EDEBE9] hover:text-[#181917]'
-                    : 'text-[#797775] opacity-70 group-hover:opacity-100 hover:bg-[#EDEBE9] hover:text-[#181917]'
+                    ? 'text-[#605E5C] hover:bg-[#F3F2F1] hover:text-[#181917]'
+                    : 'text-[#8A8886] opacity-0 group-hover:opacity-100 focus:opacity-100 hover:bg-[#EDEBE9] hover:text-[#181917]'
                 }`}
               >
                 <X className="h-3 w-3" />
@@ -231,24 +246,27 @@ export function ProjectTabsBar({
           aria-expanded={menuOpen}
           aria-label={t.openOrCreateAria}
           title={t.openInNewTab}
-          className={`flex h-6 w-6 items-center justify-center rounded transition-colors ${
+          className={`flex h-7 w-7 items-center justify-center rounded-md border transition-colors ${
             menuOpen
-              ? 'bg-[#E1DFDD] text-[#181917]'
-              : 'text-[#605E5C] hover:bg-[#E1DFDD] hover:text-[#181917]'
+              ? 'border-[#D2D0CE] bg-white text-[var(--theme-accent)] shadow-xs'
+              : 'border-transparent text-[#605E5C] hover:border-[#E1DFDD] hover:bg-white hover:text-[#181917]'
           }`}
         >
           <Plus className="h-3.5 w-3.5" />
         </button>
 
         {menuOpen && (
-          <div className="absolute left-0 top-full mt-1 w-64 rounded border border-[#D2D0CE] bg-white shadow-lg py-1 z-40">
+          <div
+            data-capture-ignore="true"
+            className="absolute left-0 top-full mt-1.5 w-72 rounded-lg border border-[#D2D0CE] bg-white shadow-xl py-1.5 z-40 text-[#252423]"
+          >
             <button
               type="button"
               onClick={() => {
                 setMenuOpen(false);
                 onCreateProject();
               }}
-              className="flex w-full items-center gap-2 px-3 py-2 text-left text-[12px] font-medium text-[var(--theme-accent)] hover:bg-[#FAF9F8]"
+              className="flex w-full items-center gap-2 px-3.5 py-2 text-left text-xs font-semibold text-[var(--theme-accent)] hover:bg-[#F3F2F1] transition-colors"
             >
               <Plus className="h-3.5 w-3.5 shrink-0" />
               <span>{t.newProjectInTab}</span>
@@ -256,11 +274,11 @@ export function ProjectTabsBar({
 
             {unopenedProjects.length > 0 && (
               <>
-                <div className="my-1 border-t border-[#E1DFDD]" />
-                <div className="px-3 py-1 text-[10px] font-semibold uppercase tracking-wider text-[#797775]">
+                <div className="my-1 border-t border-[#EDEBE9]" />
+                <div className="px-3.5 py-1 text-[10px] font-semibold uppercase tracking-wider text-[#787A74]">
                   {t.openProject}
                 </div>
-                <div className="max-h-56 overflow-y-auto">
+                <div className="max-h-60 overflow-y-auto">
                   {unopenedProjects.map((proj) => (
                     <button
                       key={proj.id}
@@ -269,12 +287,16 @@ export function ProjectTabsBar({
                         setMenuOpen(false);
                         onOpenProjectInTab(proj.id);
                       }}
-                      className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] text-[#181917] hover:bg-[#FAF9F8]"
+                      className="flex w-full items-center gap-2 px-3.5 py-1.5 text-left text-xs text-[#181917] hover:bg-[#F3F2F1] transition-colors"
                     >
+                      <span
+                        aria-hidden="true"
+                        className={`h-1.5 w-1.5 rounded-full shrink-0 ${getStatusDotColor(proj.status)}`}
+                      />
                       <span className="font-mono text-[10.5px] font-semibold text-[var(--theme-accent)] shrink-0 tabular-nums">
                         {proj.code}
                       </span>
-                      <span className="truncate">{proj.title}</span>
+                      <span className="truncate">{proj.title || t.untitled}</span>
                     </button>
                   ))}
                 </div>
@@ -282,7 +304,7 @@ export function ProjectTabsBar({
             )}
 
             {unopenedProjects.length === 0 && projects.length > 0 && (
-              <div className="border-t border-[#E1DFDD] px-3 py-2 text-[11px] text-[#797775]">
+              <div className="border-t border-[#EDEBE9] px-3.5 py-2 text-[11px] text-[#787A74]">
                 {t.allAlreadyOpen}
               </div>
             )}
@@ -290,16 +312,28 @@ export function ProjectTabsBar({
         )}
       </div>
 
-      {openProjects.length >= 2 && (
-        <button
-          type="button"
-          onClick={onCloseAllTabs}
-          className="ml-auto shrink-0 mb-1 rounded px-2 py-0.5 text-[11px] text-[#605E5C] hover:bg-[#E1DFDD] hover:text-[#181917] transition-colors"
-          title={t.closeAllTitle}
-        >
-          {t.closeTabs}
-        </button>
-      )}
+      <div className="ml-auto flex items-center gap-1 pb-1 shrink-0">
+        {onSelectOverview && (
+          <button
+            type="button"
+            onClick={onSelectOverview}
+            className="hidden sm:inline-flex items-center rounded-md border border-transparent px-2.5 py-1 text-[11px] font-medium text-[#605E5C] hover:border-[#E1DFDD] hover:bg-white hover:text-[#181917] transition-colors whitespace-nowrap"
+          >
+            {t.allProjects}
+          </button>
+        )}
+
+        {openProjects.length >= 2 && (
+          <button
+            type="button"
+            onClick={onCloseAllTabs}
+            className="rounded-md border border-transparent px-2.5 py-1 text-[11px] font-medium text-[#605E5C] hover:border-[#E1DFDD] hover:bg-white hover:text-[#B91C1C] transition-colors whitespace-nowrap"
+            title={t.closeAllTitle}
+          >
+            {t.closeTabs}
+          </button>
+        )}
+      </div>
     </div>
   );
 }

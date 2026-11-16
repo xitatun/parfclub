@@ -90,7 +90,38 @@ export default defineConfig(() => {
     ],
     resolve: {
       alias: {
-        '@': path.resolve(__dirname, '.'),
+        '@': path.resolve(import.meta.dirname, '.'),
+      },
+    },
+    build: {
+      chunkSizeWarningLimit: 900,
+      rolldownOptions: {
+        output: {
+          codeSplitting: {
+            groups: [
+              {
+                name: 'vendor-react',
+                test: /node_modules[\\/](react|react-dom|scheduler)/,
+              },
+              {
+                name: 'vendor-charts',
+                test: /node_modules[\\/](recharts|d3-|victory-)/,
+              },
+              {
+                name: 'vendor-xlsx',
+                test: /node_modules[\\/]xlsx/,
+              },
+              {
+                name: 'vendor-pdf',
+                test: /node_modules[\\/](jspdf|html2canvas|modern-screenshot|canvg|dompurify)/,
+              },
+              {
+                name: 'vendor-icons',
+                test: /node_modules[\\/]lucide-react/,
+              },
+            ],
+          },
+        },
       },
     },
     server: {

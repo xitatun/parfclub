@@ -1,6 +1,8 @@
 import {
   Activity,
   AlertTriangle,
+  ArrowRight,
+  ArrowUp,
   BellRing,
   Check,
   CheckCircle2,
@@ -9,11 +11,12 @@ import {
   FlaskConical,
   Layers,
   Plus,
-  Scale,
   Search,
   ShoppingBag,
-  Tag,
+  ShoppingCart,
+  Sparkles,
   Trash2,
+  X,
 } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import {
@@ -25,9 +28,7 @@ import {
   getCurrencySymbol,
   getIngredientStatusLabel,
   getJournalVerdictLabel,
-  getNoteTierLabel,
   getNoteTierShort,
-  getOlfactoryFamilyLabel,
   getOlfactoryFamilyShort,
   getProjectStatusLabel,
   JOURNAL_VERDICT_LABELS,
@@ -58,18 +59,24 @@ import type {
   ViewSettings,
 } from '../types/perfume';
 import {
+  FAMILY_HEX_MAP,
+} from '../data/constants';
+import {
   calculateFormulaSummary,
+  calculatePerceivedFormulaImpact,
   formatCurrencyDecimal,
   formatCurrencyRub,
   formatGrams,
   formatPercent,
+  getEffectiveConcentrateGrams,
   getIngredientStockGrams,
   getMacerationStatus,
 } from '../utils/calculations';
 import { tr } from '../data/i18n';
+import { getLocalizedFacetName } from '../data/fraterworksProfiles';
+import { resolveIfraStandard } from '../data/ifraStandards';
 import { generateId, todayIsoDate } from '../utils/storage';
 import { BottleCostCalculator } from './BottleCostCalculator';
-import { FormulaOlfactoryProfileRadar } from './FormulaOlfactoryProfileRadar';
 import { IngredientDilutionCalculator } from './IngredientDilutionCalculator';
 import { OlfactoryMapBuilder } from './OlfactoryMapBuilder';
 import {
@@ -79,6 +86,7 @@ import {
   ScentEvolutionVisualizer,
 } from './ScentEvolutionPanel';
 import { SolventDilutionCalculator } from './SolventDilutionCalculator';
+import type { CartAddPayload } from './SuggestedComponentsModal';
 
 interface ProjectDetailProps {
   project: PerfumeProject;
@@ -96,10 +104,14 @@ interface ProjectDetailProps {
   onAddPurchaseRecord: (record: PurchaseRecord) => void;
   onSaveDilutedIngredient?: (ingredient: Ingredient) => void;
   onUpdateIngredient?: (ingredient: Ingredient) => void;
+  onAddToCart?: (payload: CartAddPayload, projectId?: string) => void;
   onToast?: (message: string) => void;
   viewSettings?: ViewSettings;
   language?: AppLanguage;
   currency?: AppCurrency;
+  defaultConcentrateGrams?: number;
+  selectedVariantId?: string | null;
+  onSelectVariantId?: (variantId: string | null) => void;
 }
 
 interface ProjectDetailText {
@@ -1035,33 +1047,63 @@ export function ProjectDetail({
   onSaveDilutedIngredient,
   onToast,
   onUpdateIngredient,
+  onAddToCart,
   viewSettings = DEFAULT_VIEW_SETTINGS,
   language = 'ru',
   currency = 'RUB',
+  defaultConcentrateGrams = 10,
+  selectedVariantId: controlledVariantId,
+  onSelectVariantId,
 }: ProjectDetailProps) {
   const t = PROJECT_DETAIL_TEXT[language];
   const currencySymbol = getCurrencySymbol(currency);
   const summary = useMemo(() => calculateFormulaSummary(project.components), [project.components]);
+  const effectiveConcentrateGrams = useMemo(
+    () => getEffectiveConcentrateGrams(project, defaultConcentrateGrams),
+    [project.components, project.targetConcentrateGrams, defaultConcentrateGrams]
+  );
+  const perceivedFormula = useMemo(
+    () => calculatePerceivedFormulaImpact(project.components, ingredients, library),
+    [project.components, ingredients, library]
+  );
 
-  // Project Ingredients Tab State (supports main formula and variants)
-  const [selectedVariantId, setSelectedVariantId] = useState<string | null>(null);
+  // Project Ingredients Tab State (supports main formula and variants + Состав/Склад switcher)
+  const [uncontrolledVariantId, setUncontrolledVariantId] = useState<string | null>(null);
+  const selectedVariantId =
+    controlledVariantId !== undefined ? controlledVariantId : uncontrolledVariantId;
+  const setSelectedVariantId = onSelectVariantId || setUncontrolledVariantId;
+  const [ingredientsViewMode, setIngredientsViewMode] = useState<'composition' | 'stock'>('composition');
   const [projIngSearch, setProjIngSearch] = useState('');
   const [projIngTierFilter, setProjIngTierFilter] = useState<'all' | NoteTier>('all');
-
-  // Formula Add Component State
-  const [selectedIngredientId, setSelectedIngredientId] = useState('');
-  const [formulaPickerSearch, setFormulaPickerSearch] = useState('');
-  const [compName, setCompName] = useState('');
-  const [compTier, setCompTier] = useState<NoteTier>('heart');
-  const [compFamily, setCompFamily] = useState<OlfactoryFamilyKey>('woody');
-  const [compDilution, setCompDilution] = useState('100');
-  const [compWeight, setCompWeight] = useState('0.50');
-  const [compCostPerGram, setCompCostPerGram] = useState('0');
-  const [compNote, setCompNote] = useState('');
   const [estPickerSearch, setEstPickerSearch] = useState('');
 
-  // Batch Scale State
-  const [targetScaleGrams, setTargetScaleGrams] = useState(String(project.targetBottleMl || 30));
+  const studioIngredientNamesSet = useMemo(
+    () => new Set(ingredients.map((ing) => ing.name.trim().toLowerCase())),
+    [ingredients]
+  );
+
+  const estSelectOptions = useMemo(() => {
+    const q = estPickerSearch.trim().toLowerCase();
+    const ingList = !q
+      ? ingredients
+      : ingredients.filter(
+          (i) =>
+            i.name.toLowerCase().includes(q) ||
+            (i.bottleLabel || '').toLowerCase().includes(q) ||
+            (i.inciOrCas || '').toLowerCase().includes(q)
+        );
+    const libList = library
+      .filter((l) => {
+        if (studioIngredientNamesSet.has(l.name.trim().toLowerCase())) return false;
+        if (!q) return true;
+        return (
+          l.name.toLowerCase().includes(q) ||
+          (l.inciOrCas || '').toLowerCase().includes(q)
+        );
+      })
+      .slice(0, 60);
+    return { ingList, libList };
+  }, [estPickerSearch, ingredients, library, studioIngredientNamesSet]);
 
   // Journal Form State
   const [journalDate, setJournalDate] = useState(todayIsoDate());
@@ -1125,102 +1167,95 @@ export function ProjectDetail({
     });
   };
 
-  const handleSelectIngredientForFormula = (ingId: string) => {
-    setSelectedIngredientId(ingId);
-    if (ingId.startsWith('lib:')) {
-      const libId = ingId.slice(4);
-      const libItem = library.find((l) => l.id === libId);
-      if (!libItem) return;
-      setCompName(libItem.name);
-      setCompTier(libItem.tier);
-      setCompFamily(libItem.family);
-      setCompDilution('100');
-      setCompCostPerGram('0');
-      if (libItem.scentDescription && !compNote) {
-        setCompNote(libItem.scentDescription.slice(0, 70));
-      }
-      return;
+  const currentVariant = selectedVariantId
+    ? (project.variants || []).find((v) => v.id === selectedVariantId) || null
+    : null;
+  const activeComponents = currentVariant ? currentVariant.components : project.components;
+  const activeSummary = useMemo(
+    () => calculateFormulaSummary(activeComponents),
+    [activeComponents]
+  );
+  const activeConcentrateGrams = useMemo(
+    () =>
+      getEffectiveConcentrateGrams(
+        {
+          components: activeComponents,
+          targetConcentrateGrams: project.targetConcentrateGrams,
+        },
+        defaultConcentrateGrams
+      ),
+    [activeComponents, project.targetConcentrateGrams, defaultConcentrateGrams]
+  );
+  const activeConcPct =
+    activeConcentrateGrams > 0
+      ? (activeSummary.aromaticMixtureGrams / activeConcentrateGrams) * 100
+      : 0;
+  const activePerceivedFormula = useMemo(
+    () => calculatePerceivedFormulaImpact(activeComponents, ingredients, library),
+    [activeComponents, ingredients, library]
+  );
+
+  const updateActiveComponents = (
+    nextComponents: FormulaComponent[],
+    extraPatch?: Partial<PerfumeProject>
+  ) => {
+    if (currentVariant) {
+      patchProject({
+        ...extraPatch,
+        variants: (project.variants || []).map((v) =>
+          v.id === currentVariant.id ? { ...v, components: nextComponents } : v
+        ),
+      });
+    } else {
+      patchProject({
+        ...extraPatch,
+        components: nextComponents,
+      });
     }
-    const ing = ingredients.find((i) => i.id === ingId);
-    if (!ing) return;
-    setCompName(ing.name);
-    setCompTier(ing.tier);
-    setCompFamily(ing.family);
-    setCompDilution(String(ing.dilutionPercent));
-    const unitCost = ing.quantityGrams > 0 ? ing.priceTotal / ing.quantityGrams : 0;
-    setCompCostPerGram(unitCost.toFixed(2));
   };
 
-  const handleAddComponent = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!compName.trim()) return;
-    const resolvedIngId =
-      selectedIngredientId && !selectedIngredientId.startsWith('lib:')
-        ? selectedIngredientId
-        : undefined;
-    const newComp: FormulaComponent = {
-      id: generateId('fc'),
-      ingredientId: resolvedIngId,
-      name: compName.trim(),
-      tier: compTier,
-      family: compFamily,
-      dilutionPercent: Math.min(100, Math.max(0.01, Number(compDilution) || 100)),
-      weightGrams: Math.max(0, Number(compWeight) || 0),
-      costPerGram: Math.max(0, Number(compCostPerGram) || 0),
-      note: compNote.trim() || undefined,
-    };
-    patchProject({
-      components: [...project.components, newComp],
-    });
-    setSelectedIngredientId('');
-    setFormulaPickerSearch('');
-    setCompName('');
-    setCompWeight('0.50');
-    setCompCostPerGram('0');
-    setCompNote('');
+  const handleNormalizeConcentrateToTarget = () => {
+    if (activeSummary.aromaticMixtureGrams <= 0 || activeConcentrateGrams <= 0) return;
+    const ratio = activeConcentrateGrams / activeSummary.aromaticMixtureGrams;
+    updateActiveComponents(
+      activeComponents.map((c) => {
+        if (c.tier === 'solvent') return c;
+        return {
+          ...c,
+          weightGrams: Number((Math.max(0, c.weightGrams) * ratio).toFixed(3)),
+        };
+      }),
+      { targetConcentrateGrams: Number(activeConcentrateGrams.toFixed(2)) }
+    );
   };
 
   const handleUpdateComponent = (id: string, patch: Partial<FormulaComponent>) => {
-    patchProject({
-      components: project.components.map((c) => (c.id === id ? { ...c, ...patch } : c)),
-    });
+    updateActiveComponents(
+      activeComponents.map((c) => (c.id === id ? { ...c, ...patch } : c))
+    );
   };
 
   const handleDeleteComponent = (id: string) => {
-    patchProject({
-      components: project.components.filter((c) => c.id !== id),
-    });
-  };
-
-  const handleScaleFormula = () => {
-    const target = Number(targetScaleGrams);
-    if (!Number.isFinite(target) || target <= 0 || summary.totalWeightGrams <= 0) return;
-    const ratio = target / summary.totalWeightGrams;
-    patchProject({
-      components: project.components.map((c) => ({
-        ...c,
-        weightGrams: Number((c.weightGrams * ratio).toFixed(3)),
-      })),
-    });
+    updateActiveComponents(activeComponents.filter((c) => c.id !== id));
   };
 
   const handleAdjustSolventToTargetConcentration = () => {
     const targetPct = CONCENTRATION_TARGET_PERCENT[project.targetConcentration].defaultPct;
-    if (summary.pureAromaticGrams <= 0 || targetPct <= 0 || targetPct >= 100) return;
+    if (activeSummary.pureAromaticGrams <= 0 || targetPct <= 0 || targetPct >= 100) return;
 
-    const requiredTotalMass = summary.pureAromaticGrams / (targetPct / 100);
+    const requiredTotalMass = activeSummary.pureAromaticGrams / (targetPct / 100);
     // Non-solvent diluted components already carry (aromaticMixtureGrams - pureAromaticGrams) of carrier
     const neededSolventWeight = Math.max(
       0,
-      Number((requiredTotalMass - summary.aromaticMixtureGrams).toFixed(2))
+      Number((requiredTotalMass - activeSummary.aromaticMixtureGrams).toFixed(2))
     );
 
-    const existingSolventIdx = project.components.findIndex((c) => c.tier === 'solvent');
+    const existingSolventIdx = activeComponents.findIndex((c) => c.tier === 'solvent');
     if (existingSolventIdx >= 0) {
-      const updated = project.components.map((c, idx) =>
+      const updated = activeComponents.map((c, idx) =>
         idx === existingSolventIdx ? { ...c, weightGrams: neededSolventWeight } : c
       );
-      patchProject({ components: updated });
+      updateActiveComponents(updated);
     } else {
       const ethanolIng = ingredients.find((i) => i.tier === 'solvent');
       const costPerG =
@@ -1238,8 +1273,17 @@ export function ProjectDetail({
         costPerGram: Number(costPerG.toFixed(2)),
         note: t.autoCalculatedNote(project.targetConcentration, targetPct),
       };
-      patchProject({ components: [...project.components, solventComp] });
+      updateActiveComponents([...activeComponents, solventComp]);
     }
+    onToast?.(
+      tr(language, {
+        ru: `Спирт подобран: ${formatGrams(neededSolventWeight, 2, language)} под ${project.targetConcentration} (${targetPct}%)`,
+        en: `Alcohol matched: ${formatGrams(neededSolventWeight, 2, language)} for ${project.targetConcentration} (${targetPct}%)`,
+        it: `Alcol adattato: ${formatGrams(neededSolventWeight, 2, language)} per ${project.targetConcentration} (${targetPct}%)`,
+        es: `Alcohol ajustado: ${formatGrams(neededSolventWeight, 2, language)} para ${project.targetConcentration} (${targetPct}%)`,
+        de: `Alkohol angepasst: ${formatGrams(neededSolventWeight, 2, language)} für ${project.targetConcentration} (${targetPct}%)`,
+      })
+    );
   };
 
   const handleAddJournalEntry = (e: React.FormEvent) => {
@@ -1500,744 +1544,1089 @@ export function ProjectDetail({
     return project.journal.filter((j) => j.verdict === verdictFilter);
   }, [project.journal, verdictFilter]);
 
+  const homeOverview = useMemo(() => {
+    const ingById = new Map<string, Ingredient>();
+    const ingByName = new Map<string, Ingredient>();
+    for (const ing of ingredients) {
+      ingById.set(ing.id, ing);
+      ingByName.set(ing.name.trim().toLowerCase(), ing);
+    }
+
+    type CompactTierItem = {
+      id: string;
+      name: string;
+      family: OlfactoryFamilyKey;
+      pctConcentrate: number;
+      perceivedPct: number;
+      inStock: boolean;
+    };
+
+    const tiers: Record<'top' | 'heart' | 'base', CompactTierItem[]> = {
+      top: [],
+      heart: [],
+      base: [],
+    };
+
+    let ifraWarnings = 0;
+    let inStockComponents = 0;
+    let missingComponents = 0;
+
+    for (const comp of project.components) {
+      const matched =
+        (comp.ingredientId ? ingById.get(comp.ingredientId) : undefined) ||
+        ingByName.get(comp.name.trim().toLowerCase());
+      const compPerceived = perceivedFormula.byComponentId[comp.id];
+
+      if (matched) {
+        if (matched.status === 'in_stock') inStockComponents += 1;
+        else missingComponents += 1;
+      }
+
+      if (comp.tier !== 'solvent') {
+        const pureMass =
+          Math.max(0, comp.weightGrams) *
+          (Math.min(100, Math.max(0, comp.dilutionPercent)) / 100);
+        const pctConcentrate =
+          summary.pureAromaticGrams > 0 ? (pureMass / summary.pureAromaticGrams) * 100 : 0;
+        const pctPureTotal =
+          summary.totalWeightGrams > 0 ? (pureMass / summary.totalWeightGrams) * 100 : 0;
+        const ifraStd = resolveIfraStandard({
+          name: comp.name,
+          inciOrCas: matched?.inciOrCas || compPerceived?.passport?.inciOrCas,
+        });
+        const ifraLimit =
+          ifraStd !== undefined
+            ? ifraStd.category4LimitPercent
+            : (matched?.ifraLimitPercent ?? compPerceived?.passport?.ifraLimitPercent);
+        const isBanned =
+          ifraStd?.status === 'prohibited' ||
+          ifraStd?.status === 'eu_banned' ||
+          ifraLimit === 0;
+        if (isBanned ? comp.weightGrams > 0 : ifraLimit !== undefined && pctPureTotal > ifraLimit) {
+          ifraWarnings += 1;
+        }
+        tiers[comp.tier].push({
+          id: comp.id,
+          name: comp.name,
+          family: comp.family,
+          pctConcentrate,
+          perceivedPct: compPerceived?.perceivedImpactPercent ?? 0,
+          inStock: matched ? matched.status === 'in_stock' : true,
+        });
+      }
+    }
+
+    let topImpactPercent = 0;
+    let heartImpactPercent = 0;
+    let baseImpactPercent = 0;
+    const facetAcc = new Map<string, { facet: string; family: OlfactoryFamilyKey; percent: number }>();
+
+    for (const metric of perceivedFormula.metrics) {
+      const compTier = project.components.find((c) => c.id === metric.componentId)?.tier;
+      if (compTier === 'top') topImpactPercent += metric.perceivedImpactPercent;
+      else if (compTier === 'heart') heartImpactPercent += metric.perceivedImpactPercent;
+      else if (compTier === 'base') baseImpactPercent += metric.perceivedImpactPercent;
+
+      const breakdown = metric.passport.scentBreakdown;
+      if (breakdown && breakdown.length > 0) {
+        const sumFacetPct = breakdown.reduce((acc, f) => acc + f.percent, 0) || 100;
+        for (const facet of breakdown) {
+          const share = metric.perceivedImpactPercent * (facet.percent / sumFacetPct);
+          const key = facet.facet.trim().toLowerCase();
+          const prev = facetAcc.get(key);
+          if (prev) {
+            prev.percent += share;
+          } else {
+            facetAcc.set(key, {
+              facet: facet.facet,
+              family: facet.family,
+              percent: share,
+            });
+          }
+        }
+      }
+    }
+
+    const topFacets = Array.from(facetAcc.values()).sort((a, b) => b.percent - a.percent);
+
+    (['top', 'heart', 'base'] as const).forEach((tk) => {
+      tiers[tk].sort((a, b) => b.perceivedPct - a.perceivedPct || b.pctConcentrate - a.pctConcentrate);
+    });
+
+    const concRule = CONCENTRATION_TARGET_PERCENT[project.targetConcentration];
+    const rangeNums = concRule.range.match(/\d+(?:\.\d+)?/g);
+    const concMin = rangeNums && rangeNums[0] ? Number(rangeNums[0]) : concRule.defaultPct - 3;
+    const concMax = rangeNums && rangeNums[1] ? Number(rangeNums[1]) : concRule.defaultPct + 5;
+    const concOk =
+      summary.totalWeightGrams > 0 &&
+      summary.pureConcentrationPercent >= concMin &&
+      summary.pureConcentrationPercent <= concMax;
+
+    const formulaSearchTokens = [
+      ...project.components.filter((c) => c.tier !== 'solvent').map((c) => c.name.toLowerCase()),
+      ...topFacets.map((f) => f.facet.toLowerCase()),
+      ...project.olfactoryMap.topNotes.map((n) => n.name.toLowerCase()),
+      ...project.olfactoryMap.heartNotes.map((n) => n.name.toLowerCase()),
+      ...project.olfactoryMap.baseNotes.map((n) => n.name.toLowerCase()),
+    ];
+
+    const parseDesired = (raw?: string) =>
+      (raw || '')
+        .split(/[,;\n]+/)
+        .map((s) => s.trim())
+        .filter(Boolean)
+        .map((label) => {
+          const lower = label.toLowerCase();
+          const matched = formulaSearchTokens.some(
+            (tok) => tok.includes(lower) || lower.includes(tok)
+          );
+          return { label, matched };
+        });
+
+    const desiredParsed = {
+      top: parseDesired(project.desiredNotes?.top),
+      heart: parseDesired(project.desiredNotes?.heart),
+      base: parseDesired(project.desiredNotes?.base),
+    };
+
+    const solventSharePercent =
+      summary.totalWeightGrams > 0
+        ? (summary.solventCarrierGrams / summary.totalWeightGrams) * 100
+        : 0;
+
+    return {
+      tiers,
+      tierImpactPercent: {
+        top: topImpactPercent,
+        heart: heartImpactPercent,
+        base: baseImpactPercent,
+      },
+      topFacets,
+      ifraWarnings,
+      inStockComponents,
+      missingComponents,
+      concRule,
+      concOk,
+      desiredParsed,
+      solventSharePercent,
+    };
+  }, [
+    ingredients,
+    perceivedFormula,
+    project.components,
+    project.desiredNotes,
+    project.olfactoryMap,
+    project.targetConcentration,
+    summary,
+  ]);
+
+  const handleUpdateDesiredNotes = (tier: 'top' | 'heart' | 'base', value: string) => {
+    patchProject({
+      desiredNotes: {
+        top: project.desiredNotes?.top || '',
+        heart: project.desiredNotes?.heart || '',
+        base: project.desiredNotes?.base || '',
+        [tier]: value,
+      },
+    });
+  };
+
+  const handleImportDesiredFromOlfactoryMap = () => {
+    const mapTop = project.olfactoryMap.topNotes.map((n) => n.name.trim()).filter(Boolean).join(', ');
+    const mapHeart = project.olfactoryMap.heartNotes.map((n) => n.name.trim()).filter(Boolean).join(', ');
+    const mapBase = project.olfactoryMap.baseNotes.map((n) => n.name.trim()).filter(Boolean).join(', ');
+    if (!mapTop && !mapHeart && !mapBase) return;
+    patchProject({
+      desiredNotes: {
+        top: mapTop || project.desiredNotes?.top || '',
+        heart: mapHeart || project.desiredNotes?.heart || '',
+        base: mapBase || project.desiredNotes?.base || '',
+      },
+    });
+    onToast?.(
+      tr(language, {
+        ru: 'Желаемые ноты заполнены из ольфакторной карты',
+        en: 'Desired notes imported from Olfactory Map',
+        it: 'Note desiderate importate dalla mappa olfattiva',
+        es: 'Notas deseadas importadas del mapa olfativo',
+        de: 'Wunschnoten aus der Duftpyramide übernommen',
+      })
+    );
+  };
+
+  const goToFormulaInput = () => {
+    onChangeTab('ingredients');
+    window.setTimeout(() => {
+      const el = document.getElementById('ribbon-quick-add-input');
+      if (el instanceof HTMLInputElement) {
+        el.focus();
+      }
+    }, 60);
+  };
+
   return (
     <div className="space-y-6">
-      {/* Top Header */}
-      <div className="flex flex-col gap-4 border-b border-[#E4E4E0] pb-5">
-        <div className="flex flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
-          <div className="flex-1 min-w-0 space-y-2">
-            <div className="flex flex-wrap items-center gap-2">
-              <input
-                type="text"
-                value={project.code}
-                onChange={(e) => patchProject({ code: e.target.value })}
-                aria-label={t.projectCodeAria}
-                className="w-20 rounded-md border border-[#E4E4E0] bg-white px-2.5 py-1 font-mono text-xs font-medium text-[#181917] focus:border-[var(--theme-accent)] focus:outline-none"
-              />
-              <select
-                value={project.status}
-                onChange={(e) => patchProject({ status: e.target.value as ProjectStatus })}
-                aria-label={t.projectStatusAria}
-                className="rounded-md border border-[#E4E4E0] bg-white px-2.5 py-1 text-xs font-medium text-[#181917] focus:border-[var(--theme-accent)] focus:outline-none"
-              >
-                {(Object.keys(PROJECT_STATUS_LABELS) as ProjectStatus[]).map((st) => (
-                  <option key={st} value={st}>
-                    {getProjectStatusLabel(st, language)}
-                  </option>
-                ))}
-              </select>
-              <select
-                value={project.targetConcentration}
-                onChange={(e) =>
-                  patchProject({ targetConcentration: e.target.value as ConcentrationType })
-                }
-                aria-label={t.targetConcAria}
-                className="rounded-md border border-[#E4E4E0] bg-white px-2.5 py-1 text-xs font-medium text-[#181917] focus:border-[var(--theme-accent)] focus:outline-none"
-              >
-                {(Object.keys(CONCENTRATION_TARGET_PERCENT) as ConcentrationType[]).map((c) => (
-                  <option key={c} value={c}>
-                    {c} ({CONCENTRATION_TARGET_PERCENT[c].range})
-                  </option>
-                ))}
-              </select>
-              <div className="flex items-center gap-1 rounded-md border border-[#E4E4E0] bg-white px-2.5 py-1 text-xs">
-                <span className="text-[#6B6D68]">{t.bottleLabel}</span>
-                <input
-                  type="number"
-                  min={1}
-                  max={500}
-                  value={project.targetBottleMl}
-                  onChange={(e) =>
-                    patchProject({ targetBottleMl: Math.max(1, Number(e.target.value) || 30) })
-                  }
-                  className="w-12 bg-transparent text-right font-mono tabular-nums text-[#181917] focus:outline-none"
-                />
-                <span className="text-[#6B6D68]">{formatUnit('мл', language)}</span>
-              </div>
-              <span className="text-xs text-[#6B6D68] tabular-nums">
+      {/* Top Header & KPI Strip (shown ONLY when Level-2 tab «Главное» is open; Code/Status/Conc/Bottle live in Level-3 Ribbon) */}
+      {activeTab === 'formula' && (
+        <div className="space-y-4 border-b border-[#E4E4E0] pb-5">
+          {/* Quiet unboxed metadata line */}
+          <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-[#6B6D68]">
+            <div className="flex flex-wrap items-center gap-x-2 gap-y-1 tabular-nums">
+              <span className="font-mono font-semibold text-[#181917]">{project.code}</span>
+              <span aria-hidden="true">·</span>
+              <span>{getProjectStatusLabel(project.status, language)}</span>
+              <span aria-hidden="true">·</span>
+              <span>{project.targetConcentration}</span>
+              <span aria-hidden="true">·</span>
+              <span>
+                {project.targetBottleMl} {formatUnit('мл', language)}
+              </span>
+              <span aria-hidden="true">·</span>
+              <span>
                 {t.updatedLabel} {project.updatedAt}
               </span>
             </div>
 
-            <input
-              type="text"
-              value={project.title}
-              onChange={(e) => patchProject({ title: e.target.value })}
-              placeholder={t.fragranceTitlePlaceholder}
-              aria-label={t.projectTitleAria}
-              className="w-full bg-transparent font-serif text-3xl sm:text-4xl font-semibold tracking-tight text-[#181917] focus:outline-none focus:ring-0 border-b border-transparent focus:border-[var(--theme-accent)]"
-            />
+            {projectMacerations.length > 0 && (
+              <button
+                type="button"
+                onClick={() => onChangeTab('journal')}
+                className={`inline-flex items-center gap-1.5 text-xs font-medium hover:underline transition-colors ${
+                  readyMacerationCount > 0 ? 'text-[#15803D]' : 'text-[var(--theme-accent)]'
+                }`}
+              >
+                {readyMacerationCount > 0 ? (
+                  <BellRing className="h-3.5 w-3.5" />
+                ) : (
+                  <Clock className="h-3.5 w-3.5" />
+                )}
+                <span>
+                  {readyMacerationCount > 0
+                    ? t.macerationFinishedAlert(readyMacerationCount)
+                    : t.macerationTimersCount(projectMacerations.length)}
+                </span>
+              </button>
+            )}
           </div>
 
-          {/* Key Live Metrics Strip */}
+          {/* Editorial Title */}
+          <input
+            type="text"
+            value={project.title}
+            onChange={(e) => patchProject({ title: e.target.value })}
+            placeholder={t.fragranceTitlePlaceholder}
+            aria-label={t.projectTitleAria}
+            className="w-full bg-transparent font-serif text-3xl sm:text-4xl font-semibold tracking-tight text-[#181917] focus:outline-none focus:ring-0 border-b border-transparent focus:border-[var(--theme-accent)]"
+          />
+
+          {/* Unboxed 4-column KPI Strip */}
           {viewSettings.showProjectMetrics && (
-            <div className="flex flex-wrap items-center gap-6 rounded-xl border border-[#E4E4E0] bg-white px-5 py-3 shrink-0">
-              <div>
-                <div className="text-[11px] text-[#6B6D68]">
-                  {t.batchWeightLabel}
-                </div>
-                <div className="font-mono text-base font-semibold tabular-nums text-[#181917]">
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 pt-3 border-t border-[#EAEAE6] sm:divide-x sm:divide-[#EAEAE6]">
+              <div className="sm:pr-4">
+                <div className="text-[11px] text-[#6B6D68]">{t.batchWeightLabel}</div>
+                <div className="mt-0.5 font-mono text-lg font-semibold tabular-nums text-[#181917]">
                   {formatGrams(summary.totalWeightGrams, 2, language)}
                 </div>
               </div>
-              <div className="h-7 w-px bg-[#EAEAE6]" />
-              <div>
-                <div className="text-[11px] text-[#6B6D68]">
-                  {t.pureConcentrateLabel}
-                </div>
-                <div className="font-mono text-base font-semibold tabular-nums text-[var(--theme-accent)]">
+              <div className="sm:px-4">
+                <div className="text-[11px] text-[#6B6D68]">{t.pureConcentrateLabel}</div>
+                <div className="mt-0.5 font-mono text-lg font-semibold tabular-nums text-[var(--theme-accent)]">
                   {formatPercent(summary.pureConcentrationPercent, 1)}
                 </div>
               </div>
-              <div className="h-7 w-px bg-[#EAEAE6]" />
-              <div>
+              <div className="sm:px-4">
                 <div className="text-[11px] text-[#6B6D68]">
-                  {t.materialCostLabel}
+                  {tr(language, {
+                    ru: 'Концентрат (план)',
+                    en: 'Concentrate (target)',
+                    it: 'Concentrato (target)',
+                    es: 'Concentrado (objetivo)',
+                    de: 'Konzentrat (Ziel)',
+                  })}
                 </div>
-                <div className="font-mono text-base font-semibold tabular-nums text-[#181917]">
+                <div className="mt-0.5 font-mono text-lg font-semibold tabular-nums text-[#181917]">
+                  {formatGrams(summary.aromaticMixtureGrams, 2, language)}
+                  <span className="text-xs font-normal text-[#6B6D68]">
+                    {' '}
+                    / {formatGrams(effectiveConcentrateGrams, 2, language)}
+                  </span>
+                </div>
+              </div>
+              <div className="sm:pl-4">
+                <div className="text-[11px] text-[#6B6D68]">{t.materialCostLabel}</div>
+                <div className="mt-0.5 font-mono text-lg font-semibold tabular-nums text-[#181917]">
                   {formatCurrencyRub(summary.totalFormulaCost, language, currency)}
                 </div>
               </div>
             </div>
           )}
         </div>
+      )}
 
-        {projectMacerations.length > 0 && (
-          <div className="flex flex-wrap items-center gap-2 text-xs">
-            <button
-              type="button"
-              onClick={() => onChangeTab('journal')}
-              className={`inline-flex items-center gap-1.5 rounded-lg border px-3 py-1.5 font-medium transition-colors ${
-                readyMacerationCount > 0
-                  ? 'border-[#A7F3D0] dark:border-[#107C41]/50 bg-[#ECFDF5] text-[#15803D] hover:bg-[#D1FAE5] dark:hover:bg-[#107C41]/30'
-                  : 'border-[#E4E4E0] bg-[#FAFBF9] text-[#575955] hover:bg-[#F3F2F1]'
-              }`}
-            >
-              {readyMacerationCount > 0 ? (
-                <BellRing className="h-3.5 w-3.5" />
-              ) : (
-                <Clock className="h-3.5 w-3.5 text-[var(--theme-accent)]" />
-              )}
-              <span>
-                {readyMacerationCount > 0
-                  ? t.macerationFinishedAlert(readyMacerationCount)
-                  : t.macerationTimersCount(projectMacerations.length)}
-              </span>
-            </button>
-          </div>
-        )}
-      </div>
-
-      {/* TAB 1: IDEA & FORMULA */}
+      {/* TAB 1: ГЛАВНОЕ (EDITORIAL BRIEF & CLEAN LIVE PYRAMID) */}
       {activeTab === 'formula' && (
-        <div className="space-y-6">
-          {/* Idea & Inspiration */}
-          <section className="grid grid-cols-1 gap-4 lg:grid-cols-2 rounded-xl border border-[#E4E4E0] bg-white p-6">
-            <div>
-              <label htmlFor="project-idea" className="block text-xs font-semibold text-[#181917]">
-                {t.ideaConceptLabel}
-              </label>
-              <textarea
-                id="project-idea"
-                rows={4}
-                value={project.idea}
-                onChange={(e) => patchProject({ idea: e.target.value })}
-                placeholder={t.ideaPlaceholder}
-                className="mt-2 w-full rounded-lg border border-[#E4E4E0] bg-[#FAFBF9] px-3.5 py-2.5 text-sm leading-relaxed text-[#181917] placeholder:text-[#8B8D87] focus:border-[var(--theme-accent)] focus:bg-white focus:outline-none"
-              />
+        <div className="grid grid-cols-1 xl:grid-cols-12 gap-6 items-start">
+          {/* LEFT (7 cols): Idea, Concept, Inspiration & Desired Notes */}
+          <section className="xl:col-span-7 rounded-xl border border-[#E4E4E0] bg-white p-6 space-y-6">
+            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-[#EAEAE6] pb-3.5">
+              <h2 className="font-serif text-xl font-semibold text-[#181917]">
+                {tr(language, {
+                  ru: 'Идея, концепция и желаемые ноты',
+                  en: 'Idea, Concept & Desired Notes',
+                  it: 'Idea, Concetto e Note Desiderate',
+                  es: 'Idea, Concepto y Notas Deseadas',
+                  de: 'Idee, Konzept & Wunschnoten',
+                })}
+              </h2>
+              {(project.olfactoryMap.topNotes.length > 0 ||
+                project.olfactoryMap.heartNotes.length > 0 ||
+                project.olfactoryMap.baseNotes.length > 0) && (
+                <button
+                  type="button"
+                  onClick={handleImportDesiredFromOlfactoryMap}
+                  className="text-xs font-medium text-[var(--theme-accent)] hover:underline transition-colors whitespace-nowrap"
+                >
+                  {tr(language, {
+                    ru: 'Подтянуть ноты из карты',
+                    en: 'Import from Olfactory Map',
+                    it: 'Importa dalla mappa',
+                    es: 'Importar del mapa',
+                    de: 'Aus Duftkarte laden',
+                  })}
+                </button>
+              )}
             </div>
-            <div>
-              <label
-                htmlFor="project-inspiration"
-                className="block text-xs font-semibold text-[#181917]"
-              >
-                {t.inspirationLabel}
-              </label>
-              <textarea
-                id="project-inspiration"
-                rows={4}
-                value={project.inspiration}
-                onChange={(e) => patchProject({ inspiration: e.target.value })}
-                placeholder={t.inspirationPlaceholder}
-                className="mt-2 w-full rounded-lg border border-[#E4E4E0] bg-[#FAFBF9] px-3.5 py-2.5 text-sm leading-relaxed text-[#181917] placeholder:text-[#8B8D87] focus:border-[var(--theme-accent)] focus:bg-white focus:outline-none"
-              />
-            </div>
-          </section>
 
-          {/* Formula Table & Batch Tools */}
-          <section className="rounded-xl border border-[#E4E4E0] bg-white p-6 space-y-5">
-            <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between border-b border-[#EAEAE6] pb-4">
+            <div className="grid grid-cols-1 gap-5 md:grid-cols-2">
               <div>
-                <h2 className="font-serif text-2xl font-semibold text-[#181917]">
-                  {t.formulaSectionTitle}
-                </h2>
-                <p className="mt-0.5 text-xs text-[#6B6D68] tabular-nums">
-                  {t.pureAromaticBaseLabel}{' '}
-                  {formatGrams(summary.pureAromaticGrams, 3, language)} ·{' '}
-                  {t.solventLabel}{' '}
-                  {formatGrams(summary.solventCarrierGrams, 2, language)} ·{' '}
-                  {t.pyramidBalanceLabel}{' '}
-                  {Math.round(summary.tierPercentOfPure.top)}% /{' '}
-                  {Math.round(summary.tierPercentOfPure.heart)}% /{' '}
-                  {Math.round(summary.tierPercentOfPure.base)}%
+                <label htmlFor="project-idea" className="block text-xs font-semibold text-[#181917]">
+                  {t.ideaConceptLabel}
+                </label>
+                <textarea
+                  id="project-idea"
+                  rows={4}
+                  value={project.idea}
+                  onChange={(e) => patchProject({ idea: e.target.value })}
+                  placeholder={t.ideaPlaceholder}
+                  className="mt-1.5 w-full rounded-lg border border-[#E4E4E0] bg-[#FAFBF9] px-3.5 py-2.5 text-sm leading-relaxed text-[#181917] placeholder:text-[#8B8D87] focus:border-[var(--theme-accent)] focus:bg-white focus:outline-none"
+                />
+              </div>
+              <div>
+                <label
+                  htmlFor="project-inspiration"
+                  className="block text-xs font-semibold text-[#181917]"
+                >
+                  {t.inspirationLabel}
+                </label>
+                <textarea
+                  id="project-inspiration"
+                  rows={4}
+                  value={project.inspiration}
+                  onChange={(e) => patchProject({ inspiration: e.target.value })}
+                  placeholder={t.inspirationPlaceholder}
+                  className="mt-1.5 w-full rounded-lg border border-[#E4E4E0] bg-[#FAFBF9] px-3.5 py-2.5 text-sm leading-relaxed text-[#181917] placeholder:text-[#8B8D87] focus:border-[var(--theme-accent)] focus:bg-white focus:outline-none"
+                />
+              </div>
+            </div>
+
+            {/* Desired Notes Brief — Clean Hairline Rows (No Nested Cards, No Pill Clutter) */}
+            <div className="border-t border-[#EAEAE6] pt-5 space-y-2">
+              <div>
+                <div className="text-xs font-semibold text-[#181917]">
+                  {tr(language, {
+                    ru: 'Желаемые ноты композиции',
+                    en: 'Desired Notes (Target Brief)',
+                    it: 'Note desiderate (Brief)',
+                    es: 'Notas deseadas (Brief)',
+                    de: 'Gewünschte Duftnoten',
+                  })}
+                </div>
+                <p className="text-[11px] text-[#6B6D68]">
+                  {tr(language, {
+                    ru: 'Укажите ноты через запятую — совпадения с формулой и картой отметятся автоматически.',
+                    en: 'List target notes separated by commas — matches with your formula are highlighted automatically.',
+                    it: 'Elenca le note separate da virgola — le corrispondenze nella formula si evidenziano automaticamente.',
+                    es: 'Enumera notas separadas por comas — las coincidencias con la fórmula se marcan automáticamente.',
+                    de: 'Noten kommagetrennt angeben — Treffer in der Formel werden automatisch markiert.',
+                  })}
                 </p>
               </div>
 
-              <div className="flex flex-wrap items-center gap-2">
-                <div className="flex items-center gap-1.5 rounded-lg border border-[#E4E4E0] bg-[#FAFBF9] px-2.5 py-1.5">
-                  <Scale className="h-3.5 w-3.5 text-[#575955]" />
-                  <input
-                    type="number"
-                    min={1}
-                    step="0.5"
-                    value={targetScaleGrams}
-                    onChange={(e) => setTargetScaleGrams(e.target.value)}
-                    className="w-16 bg-transparent text-right font-mono text-xs tabular-nums text-[#181917] focus:outline-none"
-                    aria-label={t.targetMassAria}
-                  />
-                  <span className="text-xs text-[#6B6D68]">{formatUnit('г', language)}</span>
-                  <button
-                    type="button"
-                    onClick={handleScaleFormula}
-                    className="ml-1 rounded bg-white px-2 py-1 text-xs font-medium text-[#181917] border border-[#E4E4E0] hover:bg-[#F1F1EE] whitespace-nowrap"
-                  >
-                    {t.scaleBtn}
-                  </button>
-                </div>
-
-                <button
-                  type="button"
-                  onClick={handleAdjustSolventToTargetConcentration}
-                  className="inline-flex items-center gap-1.5 rounded-lg border border-[#E4E4E0] bg-white px-3 py-2 text-xs font-medium text-[#181917] hover:bg-[#F7F7F5] whitespace-nowrap"
-                  title={t.matchAlcoholTitle(
-                    CONCENTRATION_TARGET_PERCENT[project.targetConcentration].defaultPct
-                  )}
-                >
-                  <Droplets className="h-3.5 w-3.5 text-[var(--theme-accent)]" />
-                  <span>
-                    {t.matchAlcoholBtn(
-                      project.targetConcentration,
-                      CONCENTRATION_TARGET_PERCENT[project.targetConcentration].defaultPct
-                    )}
-                  </span>
-                </button>
-              </div>
-            </div>
-
-            {/* Tier visual bar */}
-            {summary.pureAromaticGrams > 0 && (
-              <div className="space-y-1.5">
-                <div className="flex h-2 w-full overflow-hidden rounded-full bg-[#EEEEEC]">
-                  <div
-                    style={{ width: `${summary.tierPercentOfPure.top}%` }}
-                    className="bg-[#D97706]"
-                    title={`${t.topLabel} ${summary.tierPercentOfPure.top.toFixed(1)}%`}
-                  />
-                  <div
-                    style={{ width: `${summary.tierPercentOfPure.heart}%` }}
-                    className="bg-[var(--theme-accent)]"
-                    title={`${t.heartLabel} ${summary.tierPercentOfPure.heart.toFixed(1)}%`}
-                  />
-                  <div
-                    style={{ width: `${summary.tierPercentOfPure.base}%` }}
-                    className="bg-[#78350F]"
-                    title={`${t.baseLabel} ${summary.tierPercentOfPure.base.toFixed(1)}%`}
-                  />
-                </div>
-                <div className="flex flex-wrap items-center gap-4 text-[11px] text-[#575955] tabular-nums">
-                  <span>
-                    {t.topLabel} {formatPercent(summary.tierPercentOfPure.top, 1)}
-                  </span>
-                  <span>
-                    {t.heartLabel} {formatPercent(summary.tierPercentOfPure.heart, 1)}
-                  </span>
-                  <span>
-                    {t.baseLabel} {formatPercent(summary.tierPercentOfPure.base, 1)}
-                  </span>
-                </div>
-              </div>
-            )}
-
-            {/* Formula Spreadsheet Table */}
-            <div className="overflow-x-auto">
-              <table className="w-full min-w-[820px] border-collapse text-left text-sm">
-                <thead>
-                  <tr className="border-b border-[#E4E4E0] text-[11px] font-semibold text-[#6B6D68]">
-                    <th className="py-2.5 pr-3">{t.colComponent}</th>
-                    <th className="py-2.5 px-2">{t.colTier}</th>
-                    <th className="py-2.5 px-2">{t.colFamily}</th>
-                    <th className="py-2.5 px-2 text-right">{t.colDilution}</th>
-                    <th className="py-2.5 px-2 text-right">{t.colMassG(formatUnit('г', language))}</th>
-                    <th className="py-2.5 px-2 text-right">{t.colPureMat}</th>
-                    <th className="py-2.5 px-2 text-right">{t.colPctFormula}</th>
-                    <th className="py-2.5 px-2 text-right">{t.colPctConc}</th>
-                    <th className="py-2.5 px-2 text-right">{t.colCost}</th>
-                    <th className="py-2.5 pl-2 text-right"></th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-[#EAEAE6]">
-                  {project.components.map((comp) => {
-                    const pureMass =
-                      comp.tier === 'solvent'
-                        ? 0
-                        : Math.max(0, comp.weightGrams) *
-                          (Math.min(100, Math.max(0, comp.dilutionPercent)) / 100);
-                    const pctFormula =
-                      summary.totalWeightGrams > 0
-                        ? (comp.weightGrams / summary.totalWeightGrams) * 100
-                        : 0;
-                    const pctPureTotal =
-                      summary.totalWeightGrams > 0
-                        ? (pureMass / summary.totalWeightGrams) * 100
-                        : 0;
-                    const pctConcentrate =
-                      comp.tier !== 'solvent' && summary.pureAromaticGrams > 0
-                        ? (pureMass / summary.pureAromaticGrams) * 100
-                        : 0;
-                    const lineCost = (comp.weightGrams || 0) * (comp.costPerGram || 0);
-
-                    const linkedIng = ingredients.find((i) => i.id === comp.ingredientId);
-                    const exceedsIfra =
-                      linkedIng?.ifraLimitPercent !== undefined &&
-                      pctPureTotal > linkedIng.ifraLimitPercent;
-
-                    return (
-                      <tr key={comp.id} className="hover:bg-[#FAFBF9]">
-                        <td className="py-2.5 pr-3">
-                          <div className="flex flex-col gap-0.5">
-                            <input
-                              type="text"
-                              value={comp.name}
-                              onChange={(e) =>
-                                handleUpdateComponent(comp.id, { name: e.target.value })
-                              }
-                              className="w-full bg-transparent font-medium text-[#181917] focus:bg-white focus:outline-none focus:ring-1 focus:ring-[var(--theme-accent)] rounded px-1 -mx-1"
-                            />
-                            <div className="flex flex-wrap items-center gap-2 text-[11px] text-[#6B6D68]">
-                              {linkedIng && (
-                                <span>{getIngredientStatusLabel(linkedIng.status, language)}</span>
-                              )}
-                              {linkedIng?.bottleLabel && (
-                                <span className="font-mono font-medium text-[var(--theme-accent)]">
-                                  ·{' '}
-                                  {language === 'ru'
-                                    ? `На бутылке: «${linkedIng.bottleLabel}»`
-                                    : `Bottle: "${linkedIng.bottleLabel}"`}
+              <div className="divide-y divide-[#EAEAE6]">
+                {(
+                  [
+                    {
+                      key: 'top' as const,
+                      label: tr(language, {
+                        ru: 'Верхние ноты',
+                        en: 'Top Notes',
+                        it: 'Note di Testa',
+                        es: 'Notas de Salida',
+                        de: 'Kopfnoten',
+                      }),
+                      role: tr(language, {
+                        ru: 'Старт',
+                        en: 'Opening',
+                        it: 'Apertura',
+                        es: 'Salida',
+                        de: 'Auftakt',
+                      }),
+                      placeholder: tr(language, {
+                        ru: 'Бергамот, розовый перец, петитгрейн, юзу...',
+                        en: 'Bergamot, pink pepper, petitgrain, yuzu...',
+                        it: 'Bergamotto, pepe rosa, petitgrain...',
+                        es: 'Bergamota, pimienta rosa, petitgrain...',
+                        de: 'Bergamotte, rosa Pfeffer, Petitgrain...',
+                      }),
+                    },
+                    {
+                      key: 'heart' as const,
+                      label: tr(language, {
+                        ru: 'Ноты сердца',
+                        en: 'Heart Notes',
+                        it: 'Note di Cuore',
+                        es: 'Notas de Corazón',
+                        de: 'Herznoten',
+                      }),
+                      role: tr(language, {
+                        ru: 'Характер',
+                        en: 'Core',
+                        it: 'Cuore',
+                        es: 'Cuerpo',
+                        de: 'Herz',
+                      }),
+                      placeholder: tr(language, {
+                        ru: 'Дамасская роза, инжир, чёрный чай, ирис...',
+                        en: 'Damask rose, fig, black tea, iris...',
+                        it: 'Rosa damascena, fico, tè nero, iris...',
+                        es: 'Rosa de Damasco, higo, té negro, iris...',
+                        de: 'Damaszener-Rose, Feige, Schwarztee, Iris...',
+                      }),
+                    },
+                    {
+                      key: 'base' as const,
+                      label: tr(language, {
+                        ru: 'Базовые ноты',
+                        en: 'Base Notes',
+                        it: 'Note di Fondo',
+                        es: 'Notas de Fondo',
+                        de: 'Basisnoten',
+                      }),
+                      role: tr(language, {
+                        ru: 'Шлейф',
+                        en: 'Drydown',
+                        it: 'Fondo',
+                        es: 'Fondo',
+                        de: 'Basis',
+                      }),
+                      placeholder: tr(language, {
+                        ru: 'Сандал, ветивер, амброксан, белый мускус...',
+                        en: 'Sandalwood, vetiver, ambroxan, white musk...',
+                        it: 'Sandalo, vetiver, ambroxan, muschio bianco...',
+                        es: 'Sándalo, vetiver, ambroxan, almizcle blanco...',
+                        de: 'Sandelholz, Vetiver, Ambroxan, weißer Moschus...',
+                      }),
+                    },
+                  ] as const
+                ).map((tierCfg) => {
+                  const rawVal = project.desiredNotes?.[tierCfg.key] || '';
+                  const parsedTags = homeOverview.desiredParsed[tierCfg.key];
+                  return (
+                    <div key={tierCfg.key} className="py-3 first:pt-2 last:pb-0 space-y-1.5">
+                      <div className="flex flex-col sm:flex-row sm:items-center gap-2">
+                        <div className="sm:w-40 shrink-0 flex items-baseline gap-1.5">
+                          <span className="text-xs font-semibold text-[#181917]">{tierCfg.label}</span>
+                          <span className="text-[11px] text-[#6B6D68]">· {tierCfg.role}</span>
+                        </div>
+                        <input
+                          type="text"
+                          value={rawVal}
+                          onChange={(e) => handleUpdateDesiredNotes(tierCfg.key, e.target.value)}
+                          placeholder={tierCfg.placeholder}
+                          className="flex-1 rounded-lg border border-[#E4E4E0] bg-[#FAFBF9] px-3 py-1.5 text-xs text-[#181917] placeholder:text-[#8B8D87] focus:border-[var(--theme-accent)] focus:bg-white focus:outline-none"
+                        />
+                      </div>
+                      {parsedTags.length > 0 && (
+                        <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 sm:pl-42 text-[11px]">
+                          {parsedTags.map((tag, idx) => (
+                            <span key={`${tierCfg.key}-des-${idx}`} className="inline-flex items-center gap-1">
+                              {idx > 0 && (
+                                <span className="text-[#D2D0CE] mr-1" aria-hidden="true">
+                                  ·
                                 </span>
                               )}
-                              {comp.note && <span>· {comp.note}</span>}
-                              {exceedsIfra && (
-                                <span className="inline-flex items-center gap-1 font-medium text-[#B91C1C]">
-                                  <AlertTriangle className="h-3 w-3" />
-                                  {t.exceedsIfra(linkedIng?.ifraLimitPercent)}
-                                </span>
+                              {tag.matched && (
+                                <Check className="h-3 w-3 text-[#15803D] shrink-0" />
                               )}
-                            </div>
-                          </div>
-                        </td>
-                        <td className="py-2.5 px-2">
-                          <select
-                            value={comp.tier}
-                            onChange={(e) =>
-                              handleUpdateComponent(comp.id, { tier: e.target.value as NoteTier })
-                            }
-                            className="rounded border border-[#E4E4E0] bg-white px-2 py-1 text-xs text-[#3F413D] focus:border-[var(--theme-accent)] focus:outline-none"
-                          >
-                            {(['top', 'heart', 'base', 'solvent'] as NoteTier[]).map((tierKey) => (
-                              <option key={tierKey} value={tierKey}>
-                                {getNoteTierShort(tierKey, language)}
-                              </option>
-                            ))}
-                          </select>
-                        </td>
-                        <td className="py-2.5 px-2">
-                          <select
-                            value={comp.family}
-                            onChange={(e) =>
-                              handleUpdateComponent(comp.id, {
-                                family: e.target.value as OlfactoryFamilyKey,
-                              })
-                            }
-                            className="rounded border border-[#E4E4E0] bg-white px-2 py-1 text-xs text-[#3F413D] focus:border-[var(--theme-accent)] focus:outline-none"
-                          >
-                            {OLFACTORY_FAMILIES.map((f) => (
-                              <option key={f.key} value={f.key}>
-                                {getOlfactoryFamilyShort(f.key, language)}
-                              </option>
-                            ))}
-                          </select>
-                        </td>
-                        <td className="py-2.5 px-2 text-right">
-                          <input
-                            type="number"
-                            min={0.01}
-                            max={100}
-                            step="0.5"
-                            value={comp.dilutionPercent}
-                            onChange={(e) =>
-                              handleUpdateComponent(comp.id, {
-                                dilutionPercent: Math.min(
-                                  100,
-                                  Math.max(0.01, Number(e.target.value) || 0)
-                                ),
-                              })
-                            }
-                            className="w-16 rounded border border-[#E4E4E0] bg-white px-2 py-1 text-right font-mono text-xs tabular-nums text-[#181917] focus:border-[var(--theme-accent)] focus:outline-none"
-                          />
-                        </td>
-                        <td className="py-2.5 px-2 text-right">
-                          <input
-                            type="number"
-                            min={0}
-                            step="0.01"
-                            value={comp.weightGrams}
-                            onChange={(e) =>
-                              handleUpdateComponent(comp.id, {
-                                weightGrams: Math.max(0, Number(e.target.value) || 0),
-                              })
-                            }
-                            className="w-20 rounded border border-[#E4E4E0] bg-white px-2 py-1 text-right font-mono text-xs font-medium tabular-nums text-[#181917] focus:border-[var(--theme-accent)] focus:outline-none"
-                          />
-                        </td>
-                        <td className="py-2.5 px-2 text-right font-mono text-xs tabular-nums text-[#575955]">
-                          {comp.tier === 'solvent' ? '—' : formatGrams(pureMass, 3, language)}
-                        </td>
-                        <td className="py-2.5 px-2 text-right font-mono text-xs tabular-nums text-[#181917]">
-                          {formatPercent(pctFormula, 1)}
-                        </td>
-                        <td className="py-2.5 px-2 text-right font-mono text-xs tabular-nums text-[var(--theme-accent)]">
-                          {comp.tier === 'solvent' ? '—' : formatPercent(pctConcentrate, 1)}
-                        </td>
-                        <td className="py-2.5 px-2 text-right font-mono text-xs tabular-nums text-[#575955]">
-                          {formatCurrencyDecimal(lineCost, language, currency)}
-                        </td>
-                        <td className="py-2.5 pl-2 text-right">
-                          <button
-                            type="button"
-                            onClick={() => handleDeleteComponent(comp.id)}
-                            className="rounded p-1.5 text-[#787A74] hover:bg-[#FEF2F2] hover:text-[#B91C1C]"
-                            aria-label={t.deleteComponentAria(comp.name)}
-                          >
-                            <Trash2 className="h-3.5 w-3.5" />
-                          </button>
-                        </td>
-                      </tr>
-                    );
-                  })}
-
-                  {project.components.length === 0 && (
-                    <tr>
-                      <td colSpan={10} className="py-8 text-center text-sm text-[#787A74]">
-                        {t.emptyFormula}
-                      </td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
+                              <span
+                                className={
+                                  tag.matched ? 'font-medium text-[#15803D]' : 'text-[#6B6D68]'
+                                }
+                                title={
+                                  tag.matched
+                                    ? tr(language, {
+                                        ru: 'Уже присутствует в формуле или карте',
+                                        en: 'Present in formula or map',
+                                        it: 'Presente nella formula o mappa',
+                                        es: 'Presente en la fórmula o mapa',
+                                        de: 'In Formel oder Duftkarte enthalten',
+                                      })
+                                    : undefined
+                                }
+                              >
+                                {tag.label}
+                              </span>
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
             </div>
-
-            {/* Add Component Form */}
-            <form
-              onSubmit={handleAddComponent}
-              className="rounded-lg border border-[#EAEAE6] bg-[#FAFBF9] p-4 space-y-3"
-            >
-              <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
-                <div className="text-xs font-semibold text-[#181917]">
-                  {t.addComponentTitle}
-                </div>
-                <div className="relative w-full sm:w-80">
-                  <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[#787A74]" />
-                  <input
-                    type="text"
-                    value={formulaPickerSearch}
-                    onChange={(e) => setFormulaPickerSearch(e.target.value)}
-                    placeholder={
-                      language === 'ru'
-                        ? 'Поиск в ингредиентах и библиотеке (1300+ эссенций)...'
-                        : 'Search studio ingredients & library...'
-                    }
-                    className="w-full rounded-lg border border-[#E4E4E0] bg-white py-1.5 pl-8 pr-2.5 text-xs text-[#181917] placeholder:text-[#8B8D87] focus:border-[var(--theme-accent)] focus:outline-none"
-                  />
-                </div>
-              </div>
-
-              {formulaPickerSearch.trim().length > 0 && (
-                <div className="max-h-44 overflow-y-auto divide-y divide-[#EAEAE6] rounded-lg border border-[#E4E4E0] bg-white">
-                  {ingredients
-                    .filter((ing) => {
-                      const q = formulaPickerSearch.trim().toLowerCase();
-                      return (
-                        ing.name.toLowerCase().includes(q) ||
-                        (ing.bottleLabel || '').toLowerCase().includes(q) ||
-                        (ing.inciOrCas || '').toLowerCase().includes(q)
-                      );
-                    })
-                    .slice(0, 12)
-                    .map((ing) => (
-                      <button
-                        key={`ing-pick-${ing.id}`}
-                        type="button"
-                        onClick={() => {
-                          handleSelectIngredientForFormula(ing.id);
-                          setFormulaPickerSearch('');
-                        }}
-                        className="flex w-full items-center justify-between gap-2 px-3 py-1.5 text-left text-xs hover:bg-[#F3F2F1]"
-                      >
-                        <span className="font-medium text-[#181917] truncate">
-                          {ing.name}
-                          {ing.bottleLabel ? (
-                            <span className="ml-1.5 font-mono text-[11px] text-[var(--theme-accent)]">
-                              [{ing.bottleLabel}]
-                            </span>
-                          ) : null}
-                        </span>
-                        <span className="shrink-0 text-[11px] text-[#6B6D68]">
-                          {getIngredientStatusLabel(ing.status, language)} · {ing.dilutionPercent}%
-                        </span>
-                      </button>
-                    ))}
-                  {library
-                    .filter((libItem) => {
-                      const q = formulaPickerSearch.trim().toLowerCase();
-                      if (
-                        ingredients.some(
-                          (ing) => ing.name.trim().toLowerCase() === libItem.name.trim().toLowerCase()
-                        )
-                      ) {
-                        return false;
-                      }
-                      return (
-                        libItem.name.toLowerCase().includes(q) ||
-                        (libItem.inciOrCas || '').toLowerCase().includes(q) ||
-                        libItem.scentDescription.toLowerCase().includes(q)
-                      );
-                    })
-                    .slice(0, 15)
-                    .map((libItem) => (
-                      <button
-                        key={`lib-pick-${libItem.id}`}
-                        type="button"
-                        onClick={() => {
-                          handleSelectIngredientForFormula(`lib:${libItem.id}`);
-                          setFormulaPickerSearch('');
-                        }}
-                        className="flex w-full items-center justify-between gap-2 px-3 py-1.5 text-left text-xs hover:bg-[#F3F2F1]"
-                      >
-                        <span className="font-medium text-[#181917] truncate">
-                          {libItem.name}
-                          {libItem.inciOrCas ? (
-                            <span className="ml-1.5 font-mono text-[11px] text-[#6B6D68]">
-                              ({libItem.inciOrCas})
-                            </span>
-                          ) : null}
-                        </span>
-                        <span className="shrink-0 text-[11px] text-[var(--theme-accent)]">
-                          {language === 'ru' ? 'Библиотека' : 'Library'} ·{' '}
-                          {getNoteTierShort(libItem.tier, language)}
-                        </span>
-                      </button>
-                    ))}
-                </div>
-              )}
-
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-6">
-                <div className="lg:col-span-2">
-                  <select
-                    value={selectedIngredientId}
-                    onChange={(e) => handleSelectIngredientForFormula(e.target.value)}
-                    className="w-full rounded-lg border border-[#E4E4E0] bg-white px-3 py-2 text-xs text-[#3F413D] focus:border-[var(--theme-accent)] focus:outline-none"
-                    aria-label={t.chooseFromCatalogAria}
-                  >
-                    <option value="">
-                      {t.chooseFromCatalogOption}
-                    </option>
-                    {ingredients
-                      .filter((ing) => {
-                        const q = formulaPickerSearch.trim().toLowerCase();
-                        if (!q) return true;
-                        return (
-                          ing.name.toLowerCase().includes(q) ||
-                          (ing.bottleLabel || '').toLowerCase().includes(q) ||
-                          (ing.inciOrCas || '').toLowerCase().includes(q)
-                        );
-                      })
-                      .map((ing) => (
-                        <option key={ing.id} value={ing.id}>
-                          {ing.name}
-                          {ing.bottleLabel ? ` [${ing.bottleLabel}]` : ''} (
-                          {getIngredientStatusLabel(ing.status, language)} · {ing.dilutionPercent}%)
-                        </option>
-                      ))}
-                    {library
-                      .filter((libItem) => {
-                        if (
-                          ingredients.some(
-                            (ing) =>
-                              ing.name.trim().toLowerCase() === libItem.name.trim().toLowerCase()
-                          )
-                        ) {
-                          return false;
-                        }
-                        const q = formulaPickerSearch.trim().toLowerCase();
-                        if (!q) return true;
-                        return (
-                          libItem.name.toLowerCase().includes(q) ||
-                          (libItem.inciOrCas || '').toLowerCase().includes(q) ||
-                          libItem.scentDescription.toLowerCase().includes(q)
-                        );
-                      })
-                      .slice(0, 80)
-                      .map((libItem) => (
-                        <option key={`lib-${libItem.id}`} value={`lib:${libItem.id}`}>
-                          [{language === 'ru' ? 'Библиотека' : 'Library'}] {libItem.name}
-                        </option>
-                      ))}
-                  </select>
-                </div>
-
-                <div className="lg:col-span-2">
-                  <input
-                    id="formula-add-component-input"
-                    type="text"
-                    required
-                    value={compName}
-                    onChange={(e) => setCompName(e.target.value)}
-                    placeholder={t.manualNamePlaceholder}
-                    className="w-full rounded-lg border border-[#E4E4E0] bg-white px-3 py-2 text-xs text-[#181917] placeholder:text-[#8B8D87] focus:border-[var(--theme-accent)] focus:outline-none"
-                  />
-                </div>
-
-                <select
-                  value={compTier}
-                  onChange={(e) => setCompTier(e.target.value as NoteTier)}
-                  className="rounded-lg border border-[#E4E4E0] bg-white px-3 py-2 text-xs text-[#181917] focus:border-[var(--theme-accent)] focus:outline-none"
-                >
-                  {(['top', 'heart', 'base', 'solvent'] as NoteTier[]).map((tierKey) => (
-                    <option key={tierKey} value={tierKey}>
-                      {getNoteTierLabel(tierKey, language)}
-                    </option>
-                  ))}
-                </select>
-
-                <select
-                  value={compFamily}
-                  onChange={(e) => setCompFamily(e.target.value as OlfactoryFamilyKey)}
-                  className="rounded-lg border border-[#E4E4E0] bg-white px-3 py-2 text-xs text-[#181917] focus:border-[var(--theme-accent)] focus:outline-none"
-                >
-                  {OLFACTORY_FAMILIES.map((f) => (
-                    <option key={f.key} value={f.key}>
-                      {getOlfactoryFamilyLabel(f.key, language)}
-                    </option>
-                  ))}
-                </select>
-              </div>
-
-              <div className="grid grid-cols-2 gap-3 sm:grid-cols-5 items-end">
-                <div>
-                  <label className="block text-[11px] text-[#6B6D68] mb-1">
-                    {t.massGLabel(formatUnit('г', language))}
-                  </label>
-                  <input
-                    type="number"
-                    min={0}
-                    step="0.01"
-                    value={compWeight}
-                    onChange={(e) => setCompWeight(e.target.value)}
-                    className="w-full rounded-lg border border-[#E4E4E0] bg-white px-3 py-2 font-mono text-xs tabular-nums text-[#181917] focus:border-[var(--theme-accent)] focus:outline-none"
-                  />
-                </div>
-                <div>
-                  <label className="block text-[11px] text-[#6B6D68] mb-1">
-                    {t.dilutionPctLabel}
-                  </label>
-                  <input
-                    type="number"
-                    min={0.01}
-                    max={100}
-                    step="0.1"
-                    value={compDilution}
-                    onChange={(e) => setCompDilution(e.target.value)}
-                    className="w-full rounded-lg border border-[#E4E4E0] bg-white px-3 py-2 font-mono text-xs tabular-nums text-[#181917] focus:border-[var(--theme-accent)] focus:outline-none"
-                  />
-                </div>
-                <div>
-                  <label className="block text-[11px] text-[#6B6D68] mb-1">
-                    {t.pricePerGramLabel(formatUnit('г', language), currencySymbol)}
-                  </label>
-                  <input
-                    type="number"
-                    min={0}
-                    step="0.1"
-                    value={compCostPerGram}
-                    onChange={(e) => setCompCostPerGram(e.target.value)}
-                    className="w-full rounded-lg border border-[#E4E4E0] bg-white px-3 py-2 font-mono text-xs tabular-nums text-[#181917] focus:border-[var(--theme-accent)] focus:outline-none"
-                  />
-                </div>
-                <div>
-                  <label className="block text-[11px] text-[#6B6D68] mb-1">
-                    {t.noteLabel}
-                  </label>
-                  <input
-                    type="text"
-                    value={compNote}
-                    onChange={(e) => setCompNote(e.target.value)}
-                    placeholder={t.roleInFormulaPlaceholder}
-                    className="w-full rounded-lg border border-[#E4E4E0] bg-white px-3 py-2 text-xs text-[#181917] focus:border-[var(--theme-accent)] focus:outline-none"
-                  />
-                </div>
-                <button
-                  type="submit"
-                  className="inline-flex items-center justify-center gap-1.5 rounded-lg bg-[var(--theme-accent)] px-4 py-2 text-xs font-medium text-white transition-colors hover:bg-[var(--theme-accent-hover)] whitespace-nowrap"
-                >
-                  <Plus className="h-3.5 w-3.5" />
-                  <span>{t.addBtn}</span>
-                </button>
-              </div>
-            </form>
           </section>
 
-          {/* Olfactory Profile & Note Distribution Radar */}
-          <FormulaOlfactoryProfileRadar
-            components={project.components}
-            targetConcentration={project.targetConcentration}
-            language={language}
-            onAddFirstComponent={() => {
-              const el = document.getElementById('formula-add-component-input');
-              el?.scrollIntoView({ behavior: 'smooth', block: 'center' });
-              if (el instanceof HTMLInputElement) {
-                el.focus();
-              }
-            }}
-          />
+          {/* RIGHT (5 cols): Clean Live Formula Pyramid & Facets */}
+          <section className="xl:col-span-5 rounded-xl border border-[#E4E4E0] bg-white p-6 space-y-5">
+            <div className="flex items-start justify-between gap-2 border-b border-[#EAEAE6] pb-3.5">
+              <div>
+                <h2 className="font-serif text-xl font-semibold text-[#181917]">
+                  {tr(language, {
+                    ru: 'Пирамида состава',
+                    en: 'Formula Pyramid',
+                    it: 'Piramide della Formula',
+                    es: 'Pirámide de Fórmula',
+                    de: 'Formel-Pyramide',
+                  })}
+                </h2>
+                <p className="mt-0.5 text-[11px] text-[#6B6D68]">
+                  {tr(language, {
+                    ru: 'Расчёт по компонентам формулы',
+                    en: 'Live breakdown from active formula',
+                    it: 'Calcolo automatico dai componenti',
+                    es: 'Desglose en vivo desde la fórmula',
+                    de: 'Live-Aufteilung aus den Komponenten',
+                  })}
+                </p>
+              </div>
+              <div className="flex items-center gap-3 text-xs font-medium shrink-0 pt-0.5">
+                <button
+                  type="button"
+                  onClick={() => onChangeTab('ingredients')}
+                  className="text-[#575955] hover:text-[#181917] transition-colors whitespace-nowrap"
+                >
+                  {tr(language, {
+                    ru: 'Состав',
+                    en: 'Formula',
+                    it: 'Formula',
+                    es: 'Fórmula',
+                    de: 'Formel',
+                  })}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onChangeTab('olfactory')}
+                  className="inline-flex items-center gap-1 text-[var(--theme-accent)] hover:underline whitespace-nowrap"
+                >
+                  <span>
+                    {tr(language, {
+                      ru: 'Карта',
+                      en: 'Map',
+                      it: 'Mappa',
+                      es: 'Mapa',
+                      de: 'Karte',
+                    })}
+                  </span>
+                  <ArrowRight className="h-3 w-3" />
+                </button>
+              </div>
+            </div>
 
-          {/* Solvent & Concentration Dilution Calculator */}
-          <SolventDilutionCalculator
-            projects={allProjects}
-            ingredients={ingredients}
-            language={language}
-            lockedProjectId={project.id}
-            onUpdateProject={onUpdateProject}
-          />
+            {summary.pureAromaticGrams <= 0 ? (
+              <div className="py-6 text-center space-y-3">
+                <p className="text-xs text-[#6B6D68]">
+                  {tr(language, {
+                    ru: 'Добавьте ароматические компоненты во вкладке «Ингредиенты» — пирамида построится автоматически.',
+                    en: 'Add aromatic components in the Ingredients tab to build the live pyramid automatically.',
+                    it: 'Aggiungi componenti aromatici nella scheda Ingredienti per generare la piramide.',
+                    es: 'Añade componentes aromáticos en la pestaña Ingredientes para generar la pirámide.',
+                    de: 'Füge Duftkomponenten im Tab „Rohstoffe“ hinzu, um die Pyramide automatisch zu erzeugen.',
+                  })}
+                </p>
+                <button
+                  type="button"
+                  onClick={goToFormulaInput}
+                  className="inline-flex items-center gap-1.5 rounded-lg bg-[var(--theme-accent)] px-4 py-2 text-xs font-medium text-white hover:bg-[var(--theme-accent-hover)] transition-colors"
+                >
+                  <Plus className="h-3.5 w-3.5" />
+                  <span>
+                    {tr(language, {
+                      ru: 'Добавить компонент',
+                      en: 'Add component',
+                      it: 'Aggiungi componente',
+                      es: 'Añadir componente',
+                      de: 'Komponente hinzufügen',
+                    })}
+                  </span>
+                </button>
+              </div>
+            ) : (
+              <div className="space-y-4">
+                {/* Single Clean Balance Strip */}
+                <div className="space-y-1.5">
+                  <div className="flex h-2 w-full overflow-hidden rounded-full bg-[#EEEEEC]">
+                    <div
+                      style={{ width: `${summary.tierPercentOfPure.top}%` }}
+                      className="bg-[#D97706]"
+                    />
+                    <div
+                      style={{ width: `${summary.tierPercentOfPure.heart}%` }}
+                      className="bg-[var(--theme-accent)]"
+                    />
+                    <div
+                      style={{ width: `${summary.tierPercentOfPure.base}%` }}
+                      className="bg-[#78350F]"
+                    />
+                  </div>
+                  <div className="flex items-center justify-between text-[11px] text-[#575955] tabular-nums">
+                    <span>
+                      {t.topLabel} {Math.round(summary.tierPercentOfPure.top)}%
+                    </span>
+                    <span>
+                      {t.heartLabel} {Math.round(summary.tierPercentOfPure.heart)}%
+                    </span>
+                    <span>
+                      {t.baseLabel} {Math.round(summary.tierPercentOfPure.base)}%
+                    </span>
+                  </div>
+                </div>
+
+                {/* Hairline-Separated Pyramid Tiers (No Nested Cards, No Pill Scatter) */}
+                <div className="divide-y divide-[#EAEAE6] border-t border-[#EAEAE6]">
+                  {(
+                    [
+                      {
+                        key: 'top' as const,
+                        label: tr(language, {
+                          ru: 'Верхние ноты',
+                          en: 'Top Notes',
+                          it: 'Note di Testa',
+                          es: 'Notas de Salida',
+                          de: 'Kopfnoten',
+                        }),
+                        massPct: summary.tierPercentOfPure.top,
+                        impactPct: homeOverview.tierImpactPercent.top,
+                      },
+                      {
+                        key: 'heart' as const,
+                        label: tr(language, {
+                          ru: 'Ноты сердца',
+                          en: 'Heart Notes',
+                          it: 'Note di Cuore',
+                          es: 'Notas de Corazón',
+                          de: 'Herznoten',
+                        }),
+                        massPct: summary.tierPercentOfPure.heart,
+                        impactPct: homeOverview.tierImpactPercent.heart,
+                      },
+                      {
+                        key: 'base' as const,
+                        label: tr(language, {
+                          ru: 'Базовые ноты',
+                          en: 'Base Notes',
+                          it: 'Note di Fondo',
+                          es: 'Notas de Fondo',
+                          de: 'Basisnoten',
+                        }),
+                        massPct: summary.tierPercentOfPure.base,
+                        impactPct: homeOverview.tierImpactPercent.base,
+                      },
+                    ] as const
+                  ).map((tierRow) => {
+                    const items = homeOverview.tiers[tierRow.key];
+                    const visibleItems = items.slice(0, 5);
+                    const hiddenCount = Math.max(0, items.length - visibleItems.length);
+                    return (
+                      <div key={tierRow.key} className="py-3 first:pt-3 space-y-2">
+                        <div className="flex items-baseline justify-between gap-2">
+                          <span className="text-xs font-semibold text-[#181917]">
+                            {tierRow.label}
+                          </span>
+                          <span className="font-mono text-[11px] text-[#6B6D68] tabular-nums">
+                            {tr(language, { ru: 'Масса', en: 'Mass', it: 'Massa', es: 'Masa', de: 'Masse' })}{' '}
+                            {Math.round(tierRow.massPct)}% ·{' '}
+                            {tr(language, { ru: 'Звуч.', en: 'Imp.', it: 'Imp.', es: 'Imp.', de: 'Wirk.' })}{' '}
+                            <strong className="text-[#181917] font-semibold">
+                              {Math.round(tierRow.impactPct)}%
+                            </strong>
+                          </span>
+                        </div>
+
+                        {items.length === 0 ? (
+                          <div className="text-xs text-[#8B8D87]">
+                            {tr(language, {
+                              ru: 'Нет компонентов этого яруса',
+                              en: 'No components in this tier',
+                              it: 'Nessun componente',
+                              es: 'Sin componentes',
+                              de: 'Keine Komponenten',
+                            })}
+                          </div>
+                        ) : (
+                          <div className="space-y-1">
+                            {visibleItems.map((it) => (
+                              <div
+                                key={it.id}
+                                className="flex items-center justify-between gap-3 text-xs"
+                                title={`${it.name} · ${formatPercent(it.pctConcentrate, 1)}`}
+                              >
+                                <span className="flex items-center gap-2 min-w-0">
+                                  <span
+                                    className="h-2 w-2 rounded-xs shrink-0"
+                                    style={{ backgroundColor: FAMILY_HEX_MAP[it.family] }}
+                                  />
+                                  <span className="truncate text-[#3F413D]">{it.name}</span>
+                                </span>
+                                <span className="font-mono text-[11px] text-[#575955] tabular-nums shrink-0">
+                                  {Math.round(it.perceivedPct > 0 ? it.perceivedPct : it.pctConcentrate)}%
+                                </span>
+                              </div>
+                            ))}
+                            {hiddenCount > 0 && (
+                              <button
+                                type="button"
+                                onClick={() => onChangeTab('ingredients')}
+                                className="pt-0.5 text-[11px] font-medium text-[var(--theme-accent)] hover:underline"
+                              >
+                                +{hiddenCount}{' '}
+                                {tr(language, {
+                                  ru: 'ещё в составе',
+                                  en: 'more in formula',
+                                  it: 'altri nella formula',
+                                  es: 'más en fórmula',
+                                  de: 'weitere in Formel',
+                                })}
+                              </button>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {/* Leading Scent Facets — Clean Proportional Lines */}
+                {homeOverview.topFacets.length > 0 && (
+                  <div className="border-t border-[#EAEAE6] pt-4 space-y-2.5">
+                    <div className="flex items-center justify-between text-xs">
+                      <span className="font-semibold text-[#181917]">
+                        {tr(language, {
+                          ru: 'Главные грани звучания',
+                          en: 'Leading Scent Facets',
+                          it: 'Sfaccettature principali',
+                          es: 'Facetas principales',
+                          de: 'Haupt-Duftfacetten',
+                        })}
+                      </span>
+                      <span className="font-mono text-[11px] text-[#6B6D68] tabular-nums">
+                        {tr(language, {
+                          ru: `Растворитель: ${Math.round(homeOverview.solventSharePercent)}%`,
+                          en: `Solvent: ${Math.round(homeOverview.solventSharePercent)}%`,
+                          it: `Solvente: ${Math.round(homeOverview.solventSharePercent)}%`,
+                          es: `Disolvente: ${Math.round(homeOverview.solventSharePercent)}%`,
+                          de: `Lösungsm.: ${Math.round(homeOverview.solventSharePercent)}%`,
+                        })}
+                      </span>
+                    </div>
+                    <div className="space-y-1.5">
+                      {homeOverview.topFacets.slice(0, 4).map((f) => (
+                        <div key={f.facet} className="flex items-center gap-3 text-xs">
+                          <span className="w-28 truncate text-[#3F413D] shrink-0">{getLocalizedFacetName(f.facet, language)}</span>
+                          <div className="flex-1 h-1.5 rounded-full bg-[#F1F1EE] overflow-hidden">
+                            <div
+                              className="h-full rounded-full"
+                              style={{
+                                width: `${Math.min(100, Math.round(f.percent))}%`,
+                                backgroundColor: FAMILY_HEX_MAP[f.family],
+                              }}
+                            />
+                          </div>
+                          <span className="w-9 text-right font-mono text-[11px] font-medium text-[#181917] tabular-nums shrink-0">
+                            {Math.round(f.percent)}%
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+          </section>
         </div>
       )}
 
-      {/* TAB 1.5: PROJECT INGREDIENTS (ONLY FOR CURRENT ACTIVE PROJECT & VARIANTS) */}
-      {activeTab === 'ingredients' && (() => {
-        const currentVariant = selectedVariantId
-          ? (project.variants || []).find((v) => v.id === selectedVariantId)
-          : null;
-        const activeComponents = currentVariant ? currentVariant.components : project.components;
-        const activeSummary = calculateFormulaSummary(activeComponents);
+      {/* TAB: УПРАВЛЕНИЕ ПРОЕКТОМ И ГОТОВНОСТЬ */}
+      {activeTab === 'management' && (
+        <div className="space-y-6">
+          <section className="rounded-xl border border-[#E4E4E0] bg-white p-5 sm:p-6 space-y-5">
+            <div className="flex items-center justify-between gap-2 border-b border-[#EAEAE6] pb-3.5">
+              <div>
+                <h2 className="font-serif text-xl font-semibold text-[#181917]">
+                  {tr(language, {
+                    ru: 'Управление проектом и готовность',
+                    en: 'Project Stage & Diagnostics',
+                    it: 'Gestione Progetto e Stato',
+                    es: 'Gestión y Estado del Proyecto',
+                    de: 'Projektsteuerung & Status',
+                  })}
+                </h2>
+                <p className="mt-0.5 text-xs text-[#6B6D68]">
+                  {tr(language, {
+                    ru: 'Стадия разработки, контроль концентрации, IFRA-ограничения и обеспеченность сырьём',
+                    en: 'Development stage, concentration check, IFRA compliance and stock readiness',
+                    it: 'Fase di sviluppo, controllo concentrazione, conformità IFRA e disponibilità scorte',
+                    es: 'Etapa de desarrollo, control de concentración, límites IFRA y disponibilidad de stock',
+                    de: 'Entwicklungsphase, Konzentrationsprüfung, IFRA-Konformität und Lagerbestand',
+                  })}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => onChangeTab('ingredients')}
+                className="inline-flex items-center gap-1 rounded-md border border-[#E4E4E0] bg-[#FAFBF9] px-3 py-1.5 text-xs font-medium text-[var(--theme-accent)] hover:bg-white hover:border-[var(--theme-accent)] transition-colors shrink-0"
+              >
+                <span>
+                  {tr(language, {
+                    ru: 'К составу формулы',
+                    en: 'To Formula Composition',
+                    it: 'Alla composizione',
+                    es: 'A la composición',
+                    de: 'Zur Formel',
+                  })}
+                </span>
+                <ArrowRight className="h-3.5 w-3.5" />
+              </button>
+            </div>
 
+                {/* Quick Stage Pipeline */}
+                <div className="space-y-1.5">
+                  <div className="text-[11px] font-medium text-[#6B6D68]">
+                    {tr(language, {
+                      ru: 'Стадия проекта',
+                      en: 'Project stage',
+                      it: 'Fase progetto',
+                      es: 'Etapa del proyecto',
+                      de: 'Projektphase',
+                    })}
+                  </div>
+                  <div className="grid grid-cols-3 sm:grid-cols-5 gap-1">
+                    {(['idea', 'formulating', 'macerating', 'completed', 'archived'] as ProjectStatus[]).map(
+                      (st) => {
+                        const active = project.status === st;
+                        return (
+                          <button
+                            key={st}
+                            type="button"
+                            onClick={() => patchProject({ status: st })}
+                            className={`rounded-md border px-2 py-1 text-[11px] font-medium transition-colors truncate ${
+                              active
+                                ? 'border-[var(--theme-accent)] bg-[var(--theme-accent-soft)] text-[var(--theme-accent)] font-semibold'
+                                : 'border-[#E4E4E0] bg-[#FAFBF9] text-[#575955] hover:bg-white'
+                            }`}
+                          >
+                            {getProjectStatusLabel(st, language)}
+                          </button>
+                        );
+                      }
+                    )}
+                  </div>
+                </div>
+
+                {/* Diagnostics Strip */}
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 pt-0.5 text-xs">
+                  <div
+                    className={`rounded-lg border px-3 py-2 ${
+                      homeOverview.concOk
+                        ? 'border-[#A7F3D0] bg-[#ECFDF5]/60'
+                        : 'border-[#EAEAE6] bg-[#FAFBF9]'
+                    }`}
+                  >
+                    <div className="text-[10px] font-semibold uppercase tracking-wide text-[#6B6D68]">
+                      {project.targetConcentration} ({homeOverview.concRule.range})
+                    </div>
+                    <div className="mt-0.5 flex items-center justify-between gap-1">
+                      <span className="font-mono text-xs font-bold tabular-nums text-[#181917]">
+                        {formatPercent(summary.pureConcentrationPercent, 1)}
+                      </span>
+                      {!homeOverview.concOk && summary.pureAromaticGrams > 0 && (
+                        <button
+                          type="button"
+                          onClick={handleAdjustSolventToTargetConcentration}
+                          className="text-[10px] font-semibold text-[var(--theme-accent)] hover:underline whitespace-nowrap"
+                        >
+                          {tr(language, {
+                            ru: 'Выровнять',
+                            en: 'Match',
+                            it: 'Allinea',
+                            es: 'Ajustar',
+                            de: 'Anpassen',
+                          })}
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  <div
+                    className={`rounded-lg border px-3 py-2 ${
+                      homeOverview.ifraWarnings > 0
+                        ? 'border-[#FECACA] bg-[#FEF2F2]/80'
+                        : 'border-[#EAEAE6] bg-[#FAFBF9]'
+                    }`}
+                  >
+                    <div className="text-[10px] font-semibold uppercase tracking-wide text-[#6B6D68]">
+                      IFRA
+                    </div>
+                    <div className="mt-0.5 flex items-center gap-1 font-mono text-xs font-bold">
+                      {homeOverview.ifraWarnings > 0 ? (
+                        <span className="text-[#B91C1C]">
+                          {tr(language, {
+                            ru: `Риск: ${homeOverview.ifraWarnings}`,
+                            en: `Over: ${homeOverview.ifraWarnings}`,
+                            it: `Oltre: ${homeOverview.ifraWarnings}`,
+                            es: `Exceso: ${homeOverview.ifraWarnings}`,
+                            de: `Über: ${homeOverview.ifraWarnings}`,
+                          })}
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center gap-1 text-[#15803D]">
+                          <CheckCircle2 className="h-3.5 w-3.5" />
+                          <span>OK</span>
+                        </span>
+                      )}
+                    </div>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => onChangeTab('ingredients')}
+                    className="rounded-lg border border-[#EAEAE6] bg-[#FAFBF9] px-3 py-2 text-left hover:border-[var(--theme-accent)] hover:bg-white transition-colors"
+                  >
+                    <div className="text-[10px] font-semibold uppercase tracking-wide text-[#6B6D68]">
+                      {tr(language, {
+                        ru: 'Сырьё в наличии',
+                        en: 'Stock Ready',
+                        it: 'Scorte Pronte',
+                        es: 'Stock Listo',
+                        de: 'Lagerstatus',
+                      })}
+                    </div>
+                    <div className="mt-0.5 font-mono text-xs font-bold tabular-nums text-[#181917]">
+                      {homeOverview.inStockComponents} /{' '}
+                      {homeOverview.inStockComponents + homeOverview.missingComponents}
+                    </div>
+                  </button>
+                </div>
+
+                {/* Quick Jump Links to Other Project Tabs */}
+                <div className="flex flex-wrap gap-1.5 pt-2 border-t border-[#EAEAE6]">
+                  <button
+                    type="button"
+                    onClick={() => onChangeTab('formula')}
+                    className="rounded-md border border-[#E4E4E0] bg-white px-2.5 py-1 text-[11px] font-medium text-[#3F413D] hover:border-[var(--theme-accent)] hover:text-[var(--theme-accent)]"
+                  >
+                    {tr(language, {
+                      ru: 'Главное и пирамида',
+                      en: 'Brief & Pyramid',
+                      it: 'Principale & Piramide',
+                      es: 'Principal y Pirámide',
+                      de: 'Start & Pyramide',
+                    })}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => onChangeTab('ingredients')}
+                    className="rounded-md border border-[#E4E4E0] bg-white px-2.5 py-1 text-[11px] font-medium text-[#3F413D] hover:border-[var(--theme-accent)] hover:text-[var(--theme-accent)]"
+                  >
+                    {tr(language, {
+                      ru: `Ингредиенты и состав (${project.components.length})`,
+                      en: `Ingredients & Formula (${project.components.length})`,
+                      it: `Ingredienti e Formula (${project.components.length})`,
+                      es: `Ingredientes y Fórmula (${project.components.length})`,
+                      de: `Rohstoffe & Formel (${project.components.length})`,
+                    })}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => onChangeTab('olfactory')}
+                    className="rounded-md border border-[#E4E4E0] bg-white px-2.5 py-1 text-[11px] font-medium text-[#3F413D] hover:border-[var(--theme-accent)] hover:text-[var(--theme-accent)]"
+                  >
+                    {tr(language, {
+                      ru: 'Ольфакторная карта',
+                      en: 'Olfactory Map',
+                      it: 'Mappa Olfattiva',
+                      es: 'Mapa Olfativo',
+                      de: 'Duftpyramide',
+                    })}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => onChangeTab('journal')}
+                    className="rounded-md border border-[#E4E4E0] bg-white px-2.5 py-1 text-[11px] font-medium text-[#3F413D] hover:border-[var(--theme-accent)] hover:text-[var(--theme-accent)]"
+                  >
+                    {tr(language, {
+                      ru: `Записи (${project.journal.length})`,
+                      en: `Notes (${project.journal.length})`,
+                      it: `Note (${project.journal.length})`,
+                      es: `Notas (${project.journal.length})`,
+                      de: `Notizen (${project.journal.length})`,
+                    })}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => onChangeTab('cost')}
+                    className="rounded-md border border-[#E4E4E0] bg-white px-2.5 py-1 text-[11px] font-medium text-[#3F413D] hover:border-[var(--theme-accent)] hover:text-[var(--theme-accent)]"
+                  >
+                    {tr(language, {
+                      ru: `Смета (${projectEstimates.length})`,
+                      en: `Budget (${projectEstimates.length})`,
+                      it: `Budget (${projectEstimates.length})`,
+                      es: `Presupuesto (${projectEstimates.length})`,
+                      de: `Budget (${projectEstimates.length})`,
+                    })}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => onChangeTab('dilution')}
+                    className="rounded-md border border-[#E4E4E0] bg-white px-2.5 py-1 text-[11px] font-medium text-[#3F413D] hover:border-[var(--theme-accent)] hover:text-[var(--theme-accent)]"
+                  >
+                    {tr(language, {
+                      ru: 'Разбавление',
+                      en: 'Dilution',
+                      it: 'Diluizione',
+                      es: 'Dilución',
+                      de: 'Verdünnung',
+                    })}
+                  </button>
+                </div>
+          </section>
+        </div>
+      )}
+
+      {/* TAB 1.5: UNIFIED COMPACT INGREDIENTS WORKSPACE */}
+      {activeTab === 'ingredients' && (() => {
         const q = projIngSearch.trim().toLowerCase();
-        const displayComponents = activeComponents.filter((comp) => {
-          if (projIngTierFilter !== 'all' && comp.tier !== projIngTierFilter) return false;
-          if (!q) return true;
-          const matched = ingredients.find(
+        const findLinkedIng = (comp: FormulaComponent) =>
+          ingredients.find(
             (i) =>
               (comp.ingredientId && i.id === comp.ingredientId) ||
               i.name.trim().toLowerCase() === comp.name.trim().toLowerCase()
           );
+
+        const displayComponents = activeComponents.filter((comp) => {
+          if (projIngTierFilter !== 'all' && comp.tier !== projIngTierFilter) return false;
+          if (!q) return true;
+          const matched = findLinkedIng(comp);
           return (
             comp.name.toLowerCase().includes(q) ||
             (comp.note || '').toLowerCase().includes(q) ||
@@ -2246,280 +2635,843 @@ export function ProjectDetail({
           );
         });
 
-        const projectStockStats = activeComponents.map((comp) => {
-          const matched = ingredients.find(
-            (i) =>
-              (comp.ingredientId && i.id === comp.ingredientId) ||
-              i.name.trim().toLowerCase() === comp.name.trim().toLowerCase()
-          );
-          const stock = matched ? getIngredientStockGrams(matched) : null;
-          const isLow = stock !== null && stock <= 15;
-          const isWishlist = matched?.status === 'wishlist';
-          return { comp, matched, stock, isLow, isWishlist };
-        });
+        let stockAlertCount = 0;
+        for (const comp of activeComponents) {
+          const matched = findLinkedIng(comp);
+          if (!matched) continue;
+          const stockVal = getIngredientStockGrams(matched);
+          const isWishlist = matched.status === 'wishlist';
+          const isShortage = stockVal !== null && comp.weightGrams > stockVal + 0.001;
+          const isLow = stockVal !== null && stockVal <= 15;
+          if (isWishlist || isShortage || isLow) {
+            stockAlertCount += 1;
+          }
+        }
 
-        const lowStockCount = projectStockStats.filter((s) => s.isLow).length;
-        const wishlistCount = projectStockStats.filter((s) => s.isWishlist).length;
+        const isFiltered = projIngTierFilter !== 'all' || q.length > 0;
 
         return (
-          <div className="space-y-6">
-            {/* Header with Title & Variants Switcher */}
-            <section className="rounded-xl border border-[#E4E4E0] bg-white p-6 space-y-4">
-              <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between border-b border-[#EDEBE9] pb-4">
-                <div>
-                  <div className="flex items-center gap-2">
-                    <span className="rounded bg-[var(--theme-accent-soft)] px-2 py-0.5 font-mono text-xs font-bold text-[var(--theme-accent)]">
-                      {project.code}
-                    </span>
-                    <h2 className="text-xl font-serif font-bold text-[#181917]">
-                      {tr(language, {
-                        ru: `Ингредиенты проекта: ${project.title || 'Без названия'}`,
-                        en: `Project Ingredients: ${project.title || 'Untitled'}`,
-                        it: `Ingredienti del Progetto: ${project.title || 'Senza titolo'}`,
-                        es: `Ingredientes del Proyecto: ${project.title || 'Sin título'}`,
-                        de: `Projekt-Rohstoffe: ${project.title || 'Ohne Titel'}`,
-                      })}
-                    </h2>
-                  </div>
-                  <p className="mt-1 text-xs text-[#575955]">
-                    {tr(language, {
-                      ru: 'Спецификация сырья только для данного проекта: подписи на флаконах, расход массы, концентрация и фактические остатки в мастерской.',
-                      en: 'Ingredient specifications strictly for this project: bottle signatures, usage weight, pure concentration, and workshop stock levels.',
-                      it: 'Specifiche delle materie prime solo per questo проект: firme sui flaconi, consumo, concentrazione e scorte in laboratorio.',
-                      es: 'Especificación de materias primas solo para este proyecto: firmas en frascos, consumo, concentración y stock en taller.',
-                      de: 'Rohstoffspezifikation nur für dieses Projekt: Flaschensignaturen, Verbrauch, Konzentration und Atelierbestand.',
-                    })}
-                  </p>
-                </div>
-
-                <button
-                  type="button"
-                  onClick={() => onChangeTab('formula')}
-                  className="inline-flex items-center gap-1.5 rounded-lg border border-[#E4E4E0] bg-[#FAF9F8] px-3.5 py-2 text-xs font-medium text-[#181917] hover:bg-white hover:border-[var(--theme-accent)] shrink-0 transition-colors"
-                >
-                  <FlaskConical className="h-3.5 w-3.5 text-[var(--theme-accent)]" />
+          <div id="formula-composition-section" className="space-y-3">
+            {/* Optional thin Variant Selector Strip (shown only if project has variants) */}
+            {(project.variants || []).length > 0 && (
+              <div className="flex flex-wrap items-center gap-1.5 rounded-lg border border-[#E4E4E0] bg-[#FAF9F8] px-3 py-1.5 text-xs">
+                <span className="inline-flex items-center gap-1 font-medium text-[#605E5C] mr-1">
+                  <Layers className="h-3.5 w-3.5 text-[var(--theme-accent)]" />
                   <span>
                     {tr(language, {
-                      ru: 'Перейти к формуле',
-                      en: 'Open in Formula',
-                      it: 'Apri nella Formula',
-                      es: 'Abrir en la Fórmula',
-                      de: 'In Formel bearbeiten',
+                      ru: 'Вариант:',
+                      en: 'Variant:',
+                      it: 'Variante:',
+                      es: 'Variante:',
+                      de: 'Variante:',
                     })}
                   </span>
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setSelectedVariantId(null)}
+                  className={`rounded px-2.5 py-1 text-xs font-medium transition-colors ${
+                    selectedVariantId === null
+                      ? 'bg-[var(--theme-accent)] text-white'
+                      : 'bg-white border border-[#E4E4E0] text-[#575955] hover:text-[#181917]'
+                  }`}
+                >
+                  {tr(language, {
+                    ru: `Основная (${project.components.length})`,
+                    en: `Main (${project.components.length})`,
+                    it: `Principale (${project.components.length})`,
+                    es: `Principal (${project.components.length})`,
+                    de: `Hauptformel (${project.components.length})`,
+                  })}
                 </button>
-              </div>
-
-              {/* Variants / Branches Switcher (if variants exist) */}
-              {(project.variants || []).length > 0 && (
-                <div className="flex flex-wrap items-center gap-2 pt-1">
-                  <span className="text-xs font-semibold text-[#575955] flex items-center gap-1">
-                    <Layers className="h-3.5 w-3.5 text-[var(--theme-accent)]" />
-                    <span>
-                      {tr(language, {
-                        ru: 'Варианты формулы:',
-                        en: 'Formula variants:',
-                        it: 'Varianti della formula:',
-                        es: 'Variantes de fórmula:',
-                        de: 'Formel-Varianten:',
-                      })}
-                    </span>
-                  </span>
+                {project.variants?.map((v) => (
                   <button
+                    key={v.id}
                     type="button"
-                    onClick={() => setSelectedVariantId(null)}
-                    className={`rounded-lg px-3 py-1.5 text-xs font-medium transition-colors ${
-                      selectedVariantId === null
-                        ? 'bg-[var(--theme-accent)] text-white shadow-xs'
-                        : 'border border-[#E4E4E0] bg-[#FAF9F8] text-[#575955] hover:bg-white'
+                    onClick={() => setSelectedVariantId(v.id)}
+                    className={`rounded px-2.5 py-1 text-xs font-medium transition-colors ${
+                      selectedVariantId === v.id
+                        ? 'bg-[var(--theme-accent)] text-white'
+                        : 'bg-white border border-[#E4E4E0] text-[#575955] hover:text-[#181917]'
                     }`}
                   >
-                    {tr(language, {
-                      ru: `Основная (${project.components.length})`,
-                      en: `Main (${project.components.length})`,
-                      it: `Principale (${project.components.length})`,
-                      es: `Principal (${project.components.length})`,
-                      de: `Hauptformel (${project.components.length})`,
-                    })}
+                    {v.name} ({v.components.length})
                   </button>
-                  {project.variants?.map((v) => (
-                    <button
-                      key={v.id}
-                      type="button"
-                      onClick={() => setSelectedVariantId(v.id)}
-                      className={`rounded-lg px-3 py-1.5 text-xs font-medium transition-colors ${
-                        selectedVariantId === v.id
-                          ? 'bg-[var(--theme-accent)] text-white shadow-xs'
-                          : 'border border-[#E4E4E0] bg-[#FAF9F8] text-[#575955] hover:bg-white'
-                      }`}
-                    >
-                      {v.name} ({v.components.length})
-                    </button>
-                  ))}
-                </div>
-              )}
+                ))}
+              </div>
+            )}
 
-              {/* Key Metrics Grid for Project Ingredients */}
-              <div id="project-ingredients-metrics" className="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-1">
-                <div className="rounded-lg border border-[#EDEBE9] bg-[#FAF9F8] p-3">
-                  <div className="text-[10px] font-semibold uppercase tracking-wider text-[#797775]">
-                    {tr(language, { ru: 'Компонентов', en: 'Components', it: 'Componenti', es: 'Componentes', de: 'Komponenten' })}
-                  </div>
-                  <div className="mt-1 font-mono text-xl font-bold text-[#181917] tabular-nums">
-                    {activeComponents.length}
-                  </div>
-                  <div className="text-xs text-[#575955]">
-                    {activeComponents.filter((c) => c.tier !== 'solvent').length}{' '}
-                    {tr(language, { ru: 'ароматич.', en: 'aromatic', it: 'aromatici', es: 'aromáticos', de: 'aromatisch' })}
-                  </div>
-                </div>
-
-                <div className="rounded-lg border border-[#EDEBE9] bg-[#FAF9F8] p-3">
-                  <div className="text-[10px] font-semibold uppercase tracking-wider text-[#797775]">
-                    {tr(language, { ru: 'Чистая эссенция', en: 'Pure Essence', it: 'Essenza pura', es: 'Esencia pura', de: 'Reine Essenz' })}
-                  </div>
-                  <div className="mt-1 font-mono text-xl font-bold text-[#181917] tabular-nums">
-                    {formatGrams(activeSummary.pureAromaticGrams, 2, language)}
-                  </div>
-                  <div className="text-xs text-[#575955]">
-                    {formatPercent(activeSummary.pureConcentrationPercent, 1)}{' '}
-                    {tr(language, { ru: 'концентрация', en: 'concentration', it: 'concentrazione', es: 'concentración', de: 'Konzentration' })}
-                  </div>
-                </div>
-
-                <div className="rounded-lg border border-[#EDEBE9] bg-[#FAF9F8] p-3">
-                  <div className="text-[10px] font-semibold uppercase tracking-wider text-[#797775]">
-                    {tr(language, { ru: 'Общая масса', en: 'Total Weight', it: 'Peso totale', es: 'Masa total', de: 'Gesamtmasse' })}
-                  </div>
-                  <div className="mt-1 font-mono text-xl font-bold text-[#181917] tabular-nums">
-                    {formatGrams(activeSummary.totalWeightGrams, 2, language)}
-                  </div>
-                  <div className="text-xs text-[#575955]">
-                    {tr(language, { ru: 'флакон', en: 'bottle', it: 'flacone', es: 'frasco', de: 'Flakon' })}: {project.targetBottleMl} мл
-                  </div>
-                </div>
-
-                <div className="rounded-lg border border-[#EDEBE9] bg-[#FAF9F8] p-3">
-                  <div className="text-[10px] font-semibold uppercase tracking-wider text-[#797775]">
-                    {tr(language, { ru: 'Наличие сырья', en: 'Stock Status', it: 'Stato scorte', es: 'Estado stock', de: 'Lagerstatus' })}
-                  </div>
-                  <div className="mt-1 font-mono text-xl font-bold text-[#181917] tabular-nums">
-                    {activeComponents.length - lowStockCount - wishlistCount} / {activeComponents.length}
-                  </div>
-                  <div className="text-xs text-[#575955]">
-                    {lowStockCount > 0 ? (
-                      <span className="text-amber-600 font-medium">
-                        {lowStockCount} {tr(language, { ru: 'заканчивается', en: 'running low', it: 'in esaurimento', es: 'agotándose', de: 'wird knapp' })}
-                      </span>
-                    ) : (
-                      <span className="text-emerald-600 font-medium">
-                        {tr(language, { ru: 'все в норме', en: 'all in stock', it: 'tutte disponibili', es: 'todo en orden', de: 'alles vorrätig' })}
+            {/* Single Compact Control Toolbar */}
+            <div className="rounded-lg border border-[#E4E4E0] bg-[#FAF9F8] px-3 py-2 flex flex-col gap-2 xl:flex-row xl:items-center xl:justify-between">
+              {/* Left: View Switcher (Состав | Склад) + Search + Tier Filter */}
+              <div className="flex flex-wrap items-center gap-2">
+                {/* Segmented Switcher */}
+                <div
+                  className="inline-flex rounded-md border border-[#D2D0CE] bg-[#EDEBE9] p-0.5 shrink-0"
+                  role="tablist"
+                >
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={ingredientsViewMode === 'composition'}
+                    onClick={() => setIngredientsViewMode('composition')}
+                    className={`inline-flex items-center gap-1.5 rounded px-2.5 py-1 text-xs transition-colors whitespace-nowrap ${
+                      ingredientsViewMode === 'composition'
+                        ? 'bg-white font-semibold text-[#181917] shadow-xs'
+                        : 'font-medium text-[#605E5C] hover:text-[#181917]'
+                    }`}
+                  >
+                    <FlaskConical className="h-3.5 w-3.5 text-[var(--theme-accent)]" />
+                    <span>
+                      {tr(language, {
+                        ru: 'Состав',
+                        en: 'Formula',
+                        it: 'Formula',
+                        es: 'Fórmula',
+                        de: 'Formel',
+                      })}
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={ingredientsViewMode === 'stock'}
+                    onClick={() => setIngredientsViewMode('stock')}
+                    className={`inline-flex items-center gap-1.5 rounded px-2.5 py-1 text-xs transition-colors whitespace-nowrap ${
+                      ingredientsViewMode === 'stock'
+                        ? 'bg-white font-semibold text-[#181917] shadow-xs'
+                        : 'font-medium text-[#605E5C] hover:text-[#181917]'
+                    }`}
+                  >
+                    <span>
+                      {tr(language, {
+                        ru: 'Склад',
+                        en: 'Stock',
+                        it: 'Magazzino',
+                        es: 'Stock',
+                        de: 'Lager',
+                      })}
+                    </span>
+                    {stockAlertCount > 0 && (
+                      <span className="rounded bg-[#FEF3C7] px-1 font-mono text-[10px] font-semibold text-[#B45309] tabular-nums">
+                        {stockAlertCount}
                       </span>
                     )}
-                  </div>
+                  </button>
                 </div>
-              </div>
-            </section>
 
-            {/* Project Ingredients Table */}
-            <section className="rounded-xl border border-[#E4E4E0] bg-white p-6 space-y-4">
-              <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between border-b border-[#EDEBE9] pb-4">
-                <div className="relative w-full sm:w-80">
-                  <Search className="pointer-events-none absolute left-3 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[#797775]" />
+                {/* Inline Search */}
+                <div className="relative w-48 sm:w-56">
+                  <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[#797775]" />
                   <input
                     type="text"
                     value={projIngSearch}
                     onChange={(e) => setProjIngSearch(e.target.value)}
                     placeholder={tr(language, {
-                      ru: 'Поиск по компонентам и подписям...',
-                      en: 'Search components and bottle labels...',
-                      it: 'Cerca per componenti ed etichette...',
-                      es: 'Buscar componentes y firmas...',
-                      de: 'Nach Komponenten & Etiketten suchen...',
+                      ru: 'Поиск по составу...',
+                      en: 'Filter formula...',
+                      it: 'Filtra formula...',
+                      es: 'Filtrar fórmula...',
+                      de: 'Formel filtern...',
                     })}
-                    className="w-full rounded-lg border border-[#E4E4E0] bg-[#FAF9F8] py-2 pl-9 pr-3 text-xs text-[#181917] placeholder:text-[#797775] focus:border-[var(--theme-accent)] focus:bg-white focus:outline-none"
+                    className="w-full rounded border border-[#D2D0CE] bg-white py-1 pl-8 pr-6 text-xs text-[#181917] placeholder:text-[#8A8886] focus:border-[var(--theme-accent)] focus:outline-none"
                   />
+                  {projIngSearch && (
+                    <button
+                      type="button"
+                      onClick={() => setProjIngSearch('')}
+                      className="absolute right-1.5 top-1/2 -translate-y-1/2 text-[#8A8886] hover:text-[#181917]"
+                      aria-label="Clear filter"
+                    >
+                      <X className="h-3 w-3" />
+                    </button>
+                  )}
                 </div>
 
-                <div className="flex flex-wrap items-center gap-1.5 text-xs">
-                  <span className="text-xs text-[#575955] mr-1">
-                    {tr(language, { ru: 'Ярус:', en: 'Tier:', it: 'Nota:', es: 'Nota:', de: 'Note:' })}
-                  </span>
+                {/* Compact Tier Filter */}
+                <div className="flex flex-wrap items-center gap-1">
                   {(['all', 'top', 'heart', 'base', 'solvent'] as const).map((tierKey) => (
                     <button
                       key={tierKey}
                       type="button"
                       onClick={() => setProjIngTierFilter(tierKey)}
-                      className={`rounded px-2.5 py-1 text-xs font-medium transition-colors ${
+                      className={`rounded px-2 py-1 text-[11px] font-medium transition-colors whitespace-nowrap ${
                         projIngTierFilter === tierKey
                           ? 'bg-[var(--theme-accent)] text-white'
-                          : 'bg-[#FAF9F8] border border-[#E4E4E0] text-[#575955] hover:bg-white'
+                          : 'bg-white border border-[#E4E4E0] text-[#575955] hover:border-[#D2D0CE] hover:text-[#181917]'
                       }`}
                     >
                       {tierKey === 'all'
                         ? tr(language, { ru: 'Все', en: 'All', it: 'Tutti', es: 'Todos', de: 'Alle' })
-                        : getNoteTierLabel(tierKey, language)}
+                        : getNoteTierShort(tierKey, language)}
                     </button>
                   ))}
                 </div>
               </div>
 
-              {displayComponents.length === 0 ? (
-                <div className="py-12 text-center text-sm text-[#797775]">
-                  {activeComponents.length === 0
-                    ? tr(language, {
-                        ru: 'В этой формуле пока нет компонентов. Добавьте их во вкладке «Формула».',
-                        en: 'No components in this formula yet. Add them in the Formula tab.',
-                        it: 'Nessun componente in questa formula. Aggiungili nella scheda Formula.',
-                        es: 'Aún no hay componentes en esta fórmula. Añádelos en la pestaña Fórmula.',
-                        de: 'Noch keine Komponenten in dieser Formel vorhanden.',
-                      })
-                    : tr(language, {
-                        ru: 'Ничего не найдено по фильтрам.',
-                        en: 'No matching components.',
-                        it: 'Nessun componente corrispondente.',
-                        es: 'No hay componentes coincidentes.',
-                        de: 'Keine passenden Komponenten.',
+              {/* Right: Compact Metrics */}
+              <div className="flex flex-wrap items-center gap-2 text-xs">
+                <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[11.5px] text-[#575955] tabular-nums pr-1">
+                  <span>
+                    {tr(language, {
+                      ru: 'Конц.:',
+                      en: 'Conc.:',
+                      it: 'Conc.:',
+                      es: 'Conc.:',
+                      de: 'Konz.:',
+                    })}{' '}
+                    <strong className="font-mono text-[#181917]">
+                      {formatGrams(activeSummary.aromaticMixtureGrams, 2, language)}
+                    </strong>{' '}
+                    / {formatGrams(activeConcentrateGrams, 1, language)} (
+                    <span
+                      className={`font-mono font-semibold ${
+                        Math.abs(activeConcPct - 100) <= 0.5
+                          ? 'text-[#15803D]'
+                          : activeConcPct > 100.5
+                            ? 'text-[#B45309]'
+                            : 'text-[var(--theme-accent)]'
+                      }`}
+                    >
+                      {formatPercent(activeConcPct, 1)}
+                    </span>
+                    )
+                  </span>
+                  {activeSummary.aromaticMixtureGrams > 0 &&
+                    Math.abs(activeSummary.aromaticMixtureGrams - activeConcentrateGrams) > 0.05 && (
+                      <button
+                        type="button"
+                        onClick={handleNormalizeConcentrateToTarget}
+                        className="rounded border border-[#D2D0CE] bg-white px-1.5 py-0.5 text-[10.5px] font-medium text-[var(--theme-accent)] hover:bg-[#F3F2F1] transition-colors whitespace-nowrap"
+                      >
+                        {tr(language, {
+                          ru: `Подогнать к ${activeConcentrateGrams} г`,
+                          en: `Fit ${activeConcentrateGrams} g`,
+                          it: `Adatta ${activeConcentrateGrams} g`,
+                          es: `Ajustar ${activeConcentrateGrams} g`,
+                          de: `Auf ${activeConcentrateGrams} g`,
+                        })}
+                      </button>
+                    )}
+                  <span aria-hidden="true">·</span>
+                  <span>
+                    {tr(language, { ru: 'Всего:', en: 'Total:', it: 'Tot.:', es: 'Total:', de: 'Ges.:' })}{' '}
+                    <strong className="font-mono text-[#181917]">
+                      {formatGrams(activeSummary.totalWeightGrams, 2, language)}
+                    </strong>
+                  </span>
+                  <span aria-hidden="true">·</span>
+                  <span title={t.pureAromaticBaseLabel}>
+                    {formatPercent(activeSummary.pureConcentrationPercent, 1)}
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            {/* Slim 3px Pyramid Balance Hairline */}
+            {activeSummary.pureAromaticGrams > 0 && (
+              <div className="flex items-center gap-3 px-0.5">
+                <div className="flex h-1.5 flex-1 overflow-hidden rounded-full bg-[#EEEEEC]">
+                  <div
+                    style={{ width: `${activeSummary.tierPercentOfPure.top}%` }}
+                    className="bg-[#D97706]"
+                    title={`${t.topLabel} ${activeSummary.tierPercentOfPure.top.toFixed(1)}%`}
+                  />
+                  <div
+                    style={{ width: `${activeSummary.tierPercentOfPure.heart}%` }}
+                    className="bg-[var(--theme-accent)]"
+                    title={`${t.heartLabel} ${activeSummary.tierPercentOfPure.heart.toFixed(1)}%`}
+                  />
+                  <div
+                    style={{ width: `${activeSummary.tierPercentOfPure.base}%` }}
+                    className="bg-[#78350F]"
+                    title={`${t.baseLabel} ${activeSummary.tierPercentOfPure.base.toFixed(1)}%`}
+                  />
+                </div>
+                <div className="shrink-0 text-[10.5px] font-mono text-[#6B6D68] tabular-nums">
+                  {getNoteTierShort('top', language)} {Math.round(activeSummary.tierPercentOfPure.top)}% ·{' '}
+                  {getNoteTierShort('heart', language)} {Math.round(activeSummary.tierPercentOfPure.heart)}% ·{' '}
+                  {getNoteTierShort('base', language)} {Math.round(activeSummary.tierPercentOfPure.base)}%
+                </div>
+              </div>
+            )}
+
+            {/* Single Unified Table Surface */}
+            <div className="rounded-lg border border-[#E4E4E0] bg-white overflow-hidden">
+              {ingredientsViewMode === 'composition' ? (
+                <div className="overflow-x-auto">
+                  <table className="w-full min-w-[900px] border-collapse text-left text-sm">
+                    <thead>
+                      <tr className="border-b border-[#E4E4E0] bg-[#FAF9F8] text-[11px] font-semibold text-[#605E5C]">
+                        <th className="py-2 pl-3 pr-2">{t.colComponent}</th>
+                        <th className="py-2 px-2">{t.colTier}</th>
+                        <th className="py-2 px-2">{t.colFamily}</th>
+                        <th className="py-2 px-2 text-right">{t.colDilution}</th>
+                        <th className="py-2 px-2 text-right">{t.colMassG(formatUnit('г', language))}</th>
+                        <th className="py-2 px-2 text-right">{t.colPureMat}</th>
+                        <th className="py-2 px-2 text-right">{t.colPctFormula}</th>
+                        <th className="py-2 px-2 text-right">{t.colPctConc}</th>
+                        <th
+                          className="py-2 px-2 text-right text-[var(--theme-accent)]"
+                          title={tr(language, {
+                            ru: 'Реальное ощущаемое звучание в формуле (с учетом Odor Impact и летучести)',
+                            en: 'Actual perceived scent impact in the formula (weighted by Odor Impact)',
+                            it: 'Impatto olfattivo percepito reale nella formula (ponderato per Odor Impact)',
+                            es: 'Impacto olfativo percibido real en la fórmula (ponderado por Odor Impact)',
+                            de: 'Tatsächliche Duftwirkung in der Formel (gewichtet nach Odor Impact)',
+                          })}
+                        >
+                          {tr(language, {
+                            ru: 'Звучание %',
+                            en: 'Scent Impact %',
+                            it: 'Impatto %',
+                            es: 'Impacto %',
+                            de: 'Duftwirkung %',
+                          })}
+                        </th>
+                        <th className="py-2 px-2 text-right">{t.colCost}</th>
+                        <th className="py-2 pl-1 pr-3 text-right"></th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-[#EDEBE9]">
+                      {displayComponents.map((comp) => {
+                        const pureMass =
+                          comp.tier === 'solvent'
+                            ? 0
+                            : Math.max(0, comp.weightGrams) *
+                              (Math.min(100, Math.max(0, comp.dilutionPercent)) / 100);
+                        const pctFormula =
+                          activeSummary.totalWeightGrams > 0
+                            ? (comp.weightGrams / activeSummary.totalWeightGrams) * 100
+                            : 0;
+                        const pctPureTotal =
+                          activeSummary.totalWeightGrams > 0
+                            ? (pureMass / activeSummary.totalWeightGrams) * 100
+                            : 0;
+                        const pctConcentratePure =
+                          comp.tier !== 'solvent' && activeSummary.pureAromaticGrams > 0
+                            ? (pureMass / activeSummary.pureAromaticGrams) * 100
+                            : 0;
+                        const pctInTargetConcentrate =
+                          comp.tier !== 'solvent' && activeConcentrateGrams > 0
+                            ? (comp.weightGrams / activeConcentrateGrams) * 100
+                            : 0;
+
+                        const linkedIng = findLinkedIng(comp);
+                        const unitCost =
+                          comp.costPerGram && comp.costPerGram > 0
+                            ? comp.costPerGram
+                            : linkedIng && linkedIng.quantityGrams > 0 && linkedIng.priceTotal > 0
+                              ? linkedIng.priceTotal / linkedIng.quantityGrams
+                              : 0;
+                        const lineCost = (comp.weightGrams || 0) * unitCost;
+
+                        const linkedStockVal = linkedIng ? getIngredientStockGrams(linkedIng) : null;
+                        const isMissingFromStock =
+                          comp.tier !== 'solvent' &&
+                          (!linkedIng ||
+                            linkedIng.status !== 'in_stock' ||
+                            (linkedStockVal !== null && comp.weightGrams > linkedStockVal + 0.001));
+                        const deficitGrams =
+                          linkedStockVal !== null
+                            ? Math.max(1, Number((comp.weightGrams - linkedStockVal).toFixed(2)))
+                            : Math.max(1, Number(comp.weightGrams.toFixed(2)));
+                        const isCompInCart = projectEstimates.some(
+                          (e) =>
+                            (comp.ingredientId && e.ingredientId === comp.ingredientId) ||
+                            e.ingredientName.trim().toLowerCase() === comp.name.trim().toLowerCase()
+                        );
+                        const compPerceived = activePerceivedFormula.byComponentId[comp.id];
+                        const passport = compPerceived?.passport;
+                        const ifraStd = resolveIfraStandard({
+                          name: comp.name,
+                          inciOrCas: linkedIng?.inciOrCas || passport?.inciOrCas,
+                        });
+                        const ifraLimit =
+                          ifraStd !== undefined
+                            ? ifraStd.category4LimitPercent
+                            : (linkedIng?.ifraLimitPercent ?? passport?.ifraLimitPercent);
+                        const isBanned =
+                          ifraStd?.status === 'prohibited' ||
+                          ifraStd?.status === 'eu_banned' ||
+                          ifraLimit === 0;
+                        const exceedsIfra =
+                          comp.tier !== 'solvent' &&
+                          (isBanned
+                            ? comp.weightGrams > 0
+                            : ifraLimit !== undefined && pctPureTotal > ifraLimit);
+
+                        return (
+                          <tr key={comp.id} className="hover:bg-[#FAFBF9]">
+                            <td className="py-2 pl-3 pr-2">
+                              <div className="flex flex-col gap-0.5">
+                                <input
+                                  type="text"
+                                  value={comp.name}
+                                  onChange={(e) =>
+                                    handleUpdateComponent(comp.id, { name: e.target.value })
+                                  }
+                                  className="w-full bg-transparent text-xs font-semibold text-[#181917] focus:bg-white focus:outline-none focus:ring-1 focus:ring-[var(--theme-accent)] rounded px-1 -mx-1"
+                                />
+                                {comp.tier !== 'solvent' && passport && (
+                                  <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-[10px] text-[#6B6D68]">
+                                    <div className="flex h-1 w-16 overflow-hidden rounded-full bg-[#EAEAE6]">
+                                      {passport.scentBreakdown.map((facet, fIdx) => (
+                                        <div
+                                          key={`${comp.id}-f-${fIdx}`}
+                                          style={{
+                                            width: `${facet.percent}%`,
+                                            backgroundColor: FAMILY_HEX_MAP[facet.family],
+                                          }}
+                                          title={`${getLocalizedFacetName(facet.facet, language)}: ${facet.percent}%`}
+                                          className="h-full"
+                                        />
+                                      ))}
+                                    </div>
+                                    <span title="Fraterworks Scent Breakdown">
+                                      {passport.scentBreakdown
+                                        .slice(0, 2)
+                                        .map((b) => `${getLocalizedFacetName(b.facet, language)} ${b.percent}%`)
+                                        .join(' · ')}
+                                    </span>
+                                    <span className="font-mono text-[#575955]">
+                                      · {tr(language, { ru: 'Импакт', en: 'Impact', it: 'Impatto', es: 'Impacto', de: 'Impact' })} {passport.odorImpact} · ~{passport.substantivityHours}{tr(language, { ru: 'ч', en: 'h', it: 'h', es: 'h', de: 'Std.' })}
+                                    </span>
+                                  </div>
+                                )}
+                                {(linkedIng?.bottleLabel || comp.note || exceedsIfra) && (
+                                  <div className="flex flex-wrap items-center gap-x-2 text-[10.5px] text-[#6B6D68]">
+                                    {linkedIng?.bottleLabel && (
+                                      <span className="font-mono font-medium text-[var(--theme-accent)]">
+                                        [{linkedIng.bottleLabel}]
+                                      </span>
+                                    )}
+                                    {comp.note && <span className="truncate max-w-[260px]">{comp.note}</span>}
+                                    {exceedsIfra && (
+                                      <span className="inline-flex items-center gap-1 font-medium text-[#B91C1C]">
+                                        <AlertTriangle className="h-3 w-3 shrink-0" />
+                                        <span>
+                                          {isBanned
+                                            ? tr(language, {
+                                                ru: 'Запрещено IFRA / ЕС (0%)',
+                                                en: 'Prohibited IFRA / EU (0%)',
+                                                it: 'Vietato IFRA / UE (0%)',
+                                                es: 'Prohibido IFRA / UE (0%)',
+                                                de: 'Verboten IFRA / EU (0%)',
+                                              })
+                                            : t.exceedsIfra(ifraLimit)}
+                                        </span>
+                                      </span>
+                                    )}
+                                  </div>
+                                )}
+                              </div>
+                            </td>
+                            <td className="py-2 px-2">
+                              <select
+                                value={comp.tier}
+                                onChange={(e) =>
+                                  handleUpdateComponent(comp.id, { tier: e.target.value as NoteTier })
+                                }
+                                className="rounded border border-[#E4E4E0] bg-white px-1.5 py-1 text-xs text-[#3F413D] focus:border-[var(--theme-accent)] focus:outline-none"
+                              >
+                                {(['top', 'heart', 'base', 'solvent'] as NoteTier[]).map((tierKey) => (
+                                  <option key={tierKey} value={tierKey}>
+                                    {getNoteTierShort(tierKey, language)}
+                                  </option>
+                                ))}
+                              </select>
+                            </td>
+                            <td className="py-2 px-2">
+                              <select
+                                value={comp.family}
+                                onChange={(e) =>
+                                  handleUpdateComponent(comp.id, {
+                                    family: e.target.value as OlfactoryFamilyKey,
+                                  })
+                                }
+                                className="rounded border border-[#E4E4E0] bg-white px-1.5 py-1 text-xs text-[#3F413D] focus:border-[var(--theme-accent)] focus:outline-none"
+                              >
+                                {OLFACTORY_FAMILIES.map((f) => (
+                                  <option key={f.key} value={f.key}>
+                                    {getOlfactoryFamilyShort(f.key, language)}
+                                  </option>
+                                ))}
+                              </select>
+                            </td>
+                            <td className="py-2 px-2 text-right">
+                              <input
+                                type="number"
+                                min={0}
+                                max={100}
+                                step="any"
+                                value={comp.dilutionPercent}
+                                onChange={(e) =>
+                                  handleUpdateComponent(comp.id, {
+                                    dilutionPercent: Math.min(
+                                      100,
+                                      Math.max(0.01, Number(e.target.value) || 0)
+                                    ),
+                                  })
+                                }
+                                className="w-14 rounded border border-[#E4E4E0] bg-white px-1.5 py-1 text-right font-mono text-xs tabular-nums text-[#181917] focus:border-[var(--theme-accent)] focus:outline-none"
+                              />
+                            </td>
+                            <td className="py-2 px-2 text-right">
+                              <div className="inline-flex items-center justify-end gap-1">
+                                <input
+                                  type="number"
+                                  min={0}
+                                  step="0.01"
+                                  value={comp.weightGrams}
+                                  onChange={(e) =>
+                                    handleUpdateComponent(comp.id, {
+                                      weightGrams: Math.max(0, Number(e.target.value) || 0),
+                                    })
+                                  }
+                                  className="w-18 rounded border border-[#E4E4E0] bg-white px-1.5 py-1 text-right font-mono text-xs font-medium tabular-nums text-[#181917] focus:border-[var(--theme-accent)] focus:outline-none"
+                                />
+                                {comp.tier !== 'solvent' && (() => {
+                                  const concentrateDeficit = Math.max(
+                                    0,
+                                    Number((activeConcentrateGrams - activeSummary.aromaticMixtureGrams).toFixed(3))
+                                  );
+                                  const canTopUp = concentrateDeficit > 0.001;
+                                  const nextMass = Number(
+                                    (Math.max(0, comp.weightGrams) + concentrateDeficit).toFixed(3)
+                                  );
+                                  return (
+                                    <button
+                                      type="button"
+                                      disabled={!canTopUp}
+                                      onClick={() => {
+                                        if (!canTopUp) return;
+                                        handleUpdateComponent(comp.id, { weightGrams: nextMass });
+                                        onToast?.(
+                                          tr(language, {
+                                            ru: `${comp.name}: +${formatGrams(concentrateDeficit, 3, language)} → концентрат ${formatGrams(activeConcentrateGrams, 2, language)}`,
+                                            en: `${comp.name}: +${formatGrams(concentrateDeficit, 3, language)} → concentrate ${formatGrams(activeConcentrateGrams, 2, language)}`,
+                                            it: `${comp.name}: +${formatGrams(concentrateDeficit, 3, language)} → concentrato ${formatGrams(activeConcentrateGrams, 2, language)}`,
+                                            es: `${comp.name}: +${formatGrams(concentrateDeficit, 3, language)} → concentrado ${formatGrams(activeConcentrateGrams, 2, language)}`,
+                                            de: `${comp.name}: +${formatGrams(concentrateDeficit, 3, language)} → Konzentrat ${formatGrams(activeConcentrateGrams, 2, language)}`,
+                                          })
+                                        );
+                                      }}
+                                      title={
+                                        canTopUp
+                                          ? tr(language, {
+                                              ru: `Довести до максимума концентрата (${formatGrams(activeConcentrateGrams, 2, language)}): +${formatGrams(concentrateDeficit, 3, language)} → ${formatGrams(nextMass, 3, language)}`,
+                                              en: `Top up concentrate to ${formatGrams(activeConcentrateGrams, 2, language)}: +${formatGrams(concentrateDeficit, 3, language)} → ${formatGrams(nextMass, 3, language)}`,
+                                              it: `Porta il concentrato a ${formatGrams(activeConcentrateGrams, 2, language)}: +${formatGrams(concentrateDeficit, 3, language)} → ${formatGrams(nextMass, 3, language)}`,
+                                              es: `Completar concentrado a ${formatGrams(activeConcentrateGrams, 2, language)}: +${formatGrams(concentrateDeficit, 3, language)} → ${formatGrams(nextMass, 3, language)}`,
+                                              de: `Konzentrat auf ${formatGrams(activeConcentrateGrams, 2, language)} auffüllen: +${formatGrams(concentrateDeficit, 3, language)} → ${formatGrams(nextMass, 3, language)}`,
+                                            })
+                                          : tr(language, {
+                                              ru: `Концентрат уже составляет ${formatGrams(activeSummary.aromaticMixtureGrams, 2, language)} / ${formatGrams(activeConcentrateGrams, 2, language)}`,
+                                              en: `Concentrate is already at ${formatGrams(activeSummary.aromaticMixtureGrams, 2, language)} / ${formatGrams(activeConcentrateGrams, 2, language)}`,
+                                              it: `Il concentrato è già a ${formatGrams(activeSummary.aromaticMixtureGrams, 2, language)} / ${formatGrams(activeConcentrateGrams, 2, language)}`,
+                                              es: `El concentrado ya está en ${formatGrams(activeSummary.aromaticMixtureGrams, 2, language)} / ${formatGrams(activeConcentrateGrams, 2, language)}`,
+                                              de: `Konzentrat liegt bereits bei ${formatGrams(activeSummary.aromaticMixtureGrams, 2, language)} / ${formatGrams(activeConcentrateGrams, 2, language)}`,
+                                            })
+                                      }
+                                      aria-label={tr(language, {
+                                        ru: `Довести ${comp.name} до максимума концентрата`,
+                                        en: `Top up ${comp.name} to target concentrate`,
+                                        it: `Completa ${comp.name} fino al concentrato`,
+                                        es: `Completar ${comp.name} hasta concentrado`,
+                                        de: `${comp.name} auf Konzentrat auffüllen`,
+                                      })}
+                                      className={`inline-flex h-6 w-6 shrink-0 items-center justify-center rounded border transition-colors ${
+                                        canTopUp
+                                          ? 'border-[#D2D0CE] bg-white text-[var(--theme-accent)] hover:bg-[#F3F2F1] hover:border-[var(--theme-accent)]'
+                                          : 'border-[#EAEAE6] bg-[#FAF9F8] text-[#B8B8B2] cursor-not-allowed'
+                                      }`}
+                                    >
+                                      <ArrowUp className="h-3 w-3" />
+                                    </button>
+                                  );
+                                })()}
+                              </div>
+                            </td>
+                            <td className="py-2 px-2 text-right font-mono text-xs tabular-nums text-[#575955]">
+                              {comp.tier === 'solvent' ? '—' : formatGrams(pureMass, 3, language)}
+                            </td>
+                            <td className="py-2 px-2 text-right font-mono text-xs tabular-nums text-[#181917]">
+                              {formatPercent(pctFormula, 1)}
+                            </td>
+                            <td className="py-2 px-2 text-right font-mono text-xs tabular-nums text-[#575955]">
+                              {comp.tier === 'solvent' ? (
+                                '—'
+                              ) : (
+                                <div className="flex flex-col items-end gap-0.5">
+                                  <div className="inline-flex items-center gap-0.5">
+                                    <input
+                                      type="number"
+                                      min={0}
+                                      max={1000}
+                                      step="0.1"
+                                      value={Number(pctInTargetConcentrate.toFixed(2))}
+                                      onChange={(e) => {
+                                        const pctVal = Math.max(0, Number(e.target.value) || 0);
+                                        handleUpdateComponent(comp.id, {
+                                          weightGrams: Number(
+                                            ((activeConcentrateGrams * pctVal) / 100).toFixed(3)
+                                          ),
+                                        });
+                                      }}
+                                      aria-label={`${comp.name} ${t.colPctConc}`}
+                                      className="w-14 rounded border border-[#E4E4E0] bg-white px-1 py-1 text-right font-mono text-xs font-medium tabular-nums text-[#181917] focus:border-[var(--theme-accent)] focus:outline-none"
+                                    />
+                                    <span className="text-[11px] text-[#6B6D68]">%</span>
+                                  </div>
+                                  {comp.dilutionPercent < 100 && (
+                                    <span className="text-[10px] text-[#787A74]">
+                                      {tr(language, {
+                                        ru: `чист. ${formatPercent(pctConcentratePure, 1)}`,
+                                        en: `pure ${formatPercent(pctConcentratePure, 1)}`,
+                                        it: `puro ${formatPercent(pctConcentratePure, 1)}`,
+                                        es: `puro ${formatPercent(pctConcentratePure, 1)}`,
+                                        de: `rein ${formatPercent(pctConcentratePure, 1)}`,
+                                      })}
+                                    </span>
+                                  )}
+                                </div>
+                              )}
+                            </td>
+                            <td className="py-2 px-2 text-right font-mono text-xs tabular-nums">
+                              {comp.tier === 'solvent' || !compPerceived ? (
+                                <span className="text-[#8B8D87]">—</span>
+                              ) : (
+                                <div className="flex flex-col items-end gap-0.5">
+                                  <div className="flex items-center gap-1">
+                                    <span className="font-semibold text-[var(--theme-accent)]">
+                                      {formatPercent(compPerceived.perceivedImpactPercent, 1)}
+                                    </span>
+                                    {compPerceived.impactRatio >= 1.5 && (
+                                      <span
+                                        className="rounded bg-[#FEF3C7] px-1 py-0.2 text-[10px] font-semibold text-[#B45309]"
+                                        title={tr(language, {
+                                          ru: 'Высокоимпактный материал: звучит заметно громче своей доли по массе',
+                                          en: 'High-impact material: smells significantly stronger than its mass share',
+                                          it: 'Materiale ad alto impatto: odora più forte della sua quota in massa',
+                                          es: 'Material de alto impacto: huele más fuerte que su porcentaje en masa',
+                                          de: 'High-Impact-Material: riecht deutlich stärker als sein Masseanteil',
+                                        })}
+                                      >
+                                        {compPerceived.impactRatio.toFixed(1)}×
+                                      </span>
+                                    )}
+                                  </div>
+                                  <div className="h-1 w-14 overflow-hidden rounded-full bg-[#EAEAE6]">
+                                    <div
+                                      style={{
+                                        width: `${Math.min(100, compPerceived.perceivedImpactPercent)}%`,
+                                      }}
+                                      className="h-full bg-[var(--theme-accent)]"
+                                    />
+                                  </div>
+                                </div>
+                              )}
+                            </td>
+                            <td className="py-2 px-2 text-right font-mono text-xs tabular-nums text-[#575955]">
+                              <div className="font-medium text-[#181917]">
+                                {formatCurrencyDecimal(lineCost, language, currency)}
+                              </div>
+                              {unitCost > 0 && (
+                                <div className="text-[10px] text-[#787A74]">
+                                  {formatCurrencyDecimal(unitCost, language, currency)}/{formatUnit('г', language)}
+                                </div>
+                              )}
+                            </td>
+                            <td className="py-2 pl-1 pr-3 text-right whitespace-nowrap">
+                              <div className="inline-flex items-center justify-end gap-1">
+                                {isMissingFromStock && onAddToCart && (
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      onAddToCart(
+                                        {
+                                          name: comp.name,
+                                          ingredientId: linkedIng?.id,
+                                          inciOrCas: linkedIng?.inciOrCas,
+                                          family: comp.family,
+                                          tier: comp.tier,
+                                          origin: linkedIng?.origin || 'synthetic',
+                                          dilutionPercent: comp.dilutionPercent,
+                                          requiredGrams: deficitGrams,
+                                          costPerGram: comp.costPerGram,
+                                          olfactoryNotes: linkedIng?.olfactoryNotes || comp.note,
+                                          odorImpact: comp.odorImpact,
+                                          substantivityHours: comp.substantivityHours,
+                                          scentBreakdown: comp.scentBreakdown,
+                                        },
+                                        project.id
+                                      )
+                                    }
+                                    className={`inline-flex items-center gap-1 rounded border px-1.5 py-1 text-[10.5px] font-medium transition-colors ${
+                                      isCompInCart
+                                        ? 'border-[#A7F3D0] bg-[#ECFDF5] text-[#15803D]'
+                                        : 'border-[#E4E4E0] bg-white text-[#B45309] hover:bg-[#FFFBEB] hover:border-[#F59E0B]'
+                                    }`}
+                                    title={tr(language, {
+                                      ru: 'Нет на складе — добавить ингредиент в корзину (список покупок и смета)',
+                                      en: 'Missing from stock — add to cart (shopping list & budget)',
+                                      it: 'Non in magazzino — aggiungi al carrello',
+                                      es: 'Sin stock — añadir al carrito',
+                                      de: 'Nicht auf Lager — in den Warenkorb',
+                                    })}
+                                    aria-label={tr(language, {
+                                      ru: `Добавить ${comp.name} в корзину`,
+                                      en: `Add ${comp.name} to cart`,
+                                      it: `Aggiungi ${comp.name} al carrello`,
+                                      es: `Añadir ${comp.name} al carrito`,
+                                      de: `${comp.name} in den Warenkorb`,
+                                    })}
+                                  >
+                                    {isCompInCart ? (
+                                      <Check className="h-3 w-3 shrink-0" />
+                                    ) : (
+                                      <ShoppingCart className="h-3 w-3 shrink-0" />
+                                    )}
+                                    <span className="hidden 2xl:inline">
+                                      {isCompInCart
+                                        ? tr(language, {
+                                            ru: 'В корзине',
+                                            en: 'In cart',
+                                            it: 'Nel carrello',
+                                            es: 'En carrito',
+                                            de: 'Im Korb',
+                                          })
+                                        : tr(language, {
+                                            ru: 'В корзину',
+                                            en: 'To cart',
+                                            it: 'Carrello',
+                                            es: 'Carrito',
+                                            de: 'Warenkorb',
+                                          })}
+                                    </span>
+                                  </button>
+                                )}
+                                <button
+                                  type="button"
+                                  onClick={() => handleDeleteComponent(comp.id)}
+                                  className="rounded p-1 text-[#787A74] hover:bg-[#FEF2F2] hover:text-[#B91C1C]"
+                                  aria-label={t.deleteComponentAria(comp.name)}
+                                >
+                                  <Trash2 className="h-3.5 w-3.5" />
+                                </button>
+                              </div>
+                            </td>
+                          </tr>
+                        );
                       })}
+
+                      {displayComponents.length === 0 && (
+                        <tr>
+                          <td colSpan={11} className="py-10 text-center text-xs text-[#787A74]">
+                            {activeComponents.length === 0
+                              ? tr(language, {
+                                  ru: 'В формуле пока нет компонентов — нажмите «+» на верхней ленте, чтобы добавить аромат из библиотеки или склада.',
+                                  en: 'No components yet — use "+" on the top ribbon to search and add materials.',
+                                  it: 'Nessun componente ancora — usa "+" sulla barra in alto per aggiungere essenze.',
+                                  es: 'Sin componentes aún — usa "+" en la cinta superior para añadir aromas.',
+                                  de: 'Noch keine Rohstoffe — oben im Menüband über "+" suchen und hinzufügen.',
+                                })
+                              : tr(language, {
+                                  ru: 'По заданному фильтру ничего не найдено.',
+                                  en: 'No matching components for current filters.',
+                                  it: 'Nessun componente corrispondente ai filtri.',
+                                  es: 'Ningún componente coincide con el filtro.',
+                                  de: 'Keine passenden Rohstoffe gefunden.',
+                                })}
+                          </td>
+                        </tr>
+                      )}
+                    </tbody>
+                    {activeComponents.length > 0 && (
+                      <tfoot>
+                        <tr className="border-t border-[#E4E4E0] bg-[#FAF9F8] text-xs font-semibold text-[#181917] tabular-nums">
+                          <td colSpan={4} className="py-2.5 pl-3 pr-2 text-[#575955]">
+                            {tr(language, {
+                              ru: `Итого (${activeComponents.length} комп.${isFiltered ? `, показано ${displayComponents.length}` : ''} · концентрат ${formatGrams(activeConcentrateGrams, 2, language)})`,
+                              en: `Total (${activeComponents.length} items${isFiltered ? `, ${displayComponents.length} shown` : ''} · concentrate ${formatGrams(activeConcentrateGrams, 2, language)})`,
+                              it: `Totale (${activeComponents.length} comp.${isFiltered ? `, mostrati ${displayComponents.length}` : ''} · concentrato ${formatGrams(activeConcentrateGrams, 2, language)})`,
+                              es: `Total (${activeComponents.length} comp.${isFiltered ? `, ${displayComponents.length} vis.` : ''} · concentrado ${formatGrams(activeConcentrateGrams, 2, language)})`,
+                              de: `Gesamt (${activeComponents.length} Pos.${isFiltered ? `, ${displayComponents.length} gefiltert` : ''} · Konzentrat ${formatGrams(activeConcentrateGrams, 2, language)})`,
+                            })}
+                          </td>
+                          <td className="py-2.5 px-2 text-right font-mono">
+                            {formatGrams(activeSummary.totalWeightGrams, 2, language)}
+                          </td>
+                          <td className="py-2.5 px-2 text-right font-mono text-[#575955]">
+                            {formatGrams(activeSummary.pureAromaticGrams, 3, language)}
+                          </td>
+                          <td className="py-2.5 px-2 text-right font-mono text-[#575955]">
+                            100%
+                          </td>
+                          <td
+                            className={`py-2.5 px-2 text-right font-mono ${
+                              Math.abs(activeConcPct - 100) <= 0.5
+                                ? 'text-[#15803D]'
+                                : activeConcPct > 100.5
+                                  ? 'text-[#B45309]'
+                                  : 'text-[var(--theme-accent)]'
+                            }`}
+                          >
+                            {formatPercent(activeConcPct, 1)}
+                          </td>
+                          <td className="py-2.5 px-2 text-right font-mono text-[#575955]">
+                            {activeSummary.aromaticMixtureGrams > 0 ? '100%' : '—'}
+                          </td>
+                          <td className="py-2.5 px-2 text-right font-mono">
+                            {formatCurrencyDecimal(activeSummary.totalFormulaCost, language, currency)}
+                          </td>
+                          <td />
+                        </tr>
+                      </tfoot>
+                    )}
+                  </table>
                 </div>
               ) : (
-                <div className="overflow-x-auto rounded-lg border border-[#EDEBE9]">
-                  <table className="w-full text-left border-collapse text-xs">
-                    <thead className="bg-[#FAF9F8] border-b border-[#EDEBE9] text-[11px] font-semibold uppercase tracking-wider text-[#605E5C]">
+                <div className="overflow-x-auto">
+                  <table className="w-full min-w-[820px] text-left border-collapse text-xs">
+                    <thead className="bg-[#FAF9F8] border-b border-[#E4E4E0] text-[11px] font-semibold text-[#605E5C]">
                       <tr>
-                        <th className="py-2.5 px-3">
+                        <th className="py-2 pl-3 pr-2">
                           {tr(language, { ru: 'Компонент', en: 'Component', it: 'Componente', es: 'Componente', de: 'Rohstoff' })}
                         </th>
-                        <th className="py-2.5 px-3 min-w-[200px]">
-                          {tr(language, { ru: 'Как подписано на бутылке', en: 'Bottle Label / Signature', it: 'Etichetta flacone', es: 'Firma en frasco', de: 'Flaschenbeschriftung' })}
+                        <th className="py-2 px-2 min-w-[200px]">
+                          {tr(language, { ru: 'Подпись на бутылке', en: 'Bottle Label', it: 'Etichetta flacone', es: 'Etiqueta frasco', de: 'Flaschenbeschriftung' })}
                         </th>
-                        <th className="py-2.5 px-3">
+                        <th className="py-2 px-2">
                           {tr(language, { ru: 'Ярус · Семейство', en: 'Tier · Family', it: 'Nota · Famiglia', es: 'Nota · Familia', de: 'Note · Familie' })}
                         </th>
-                        <th className="py-2.5 px-3 text-right">
-                          {tr(language, { ru: 'Разведение', en: 'Dilution', it: 'Diluizione', es: 'Dilución', de: 'Verdünnung' })}
+                        <th className="py-2 px-2 text-right">
+                          {tr(language, { ru: 'Развед.', en: 'Dilution', it: 'Diluizione', es: 'Dilución', de: 'Verdünn.' })}
                         </th>
-                        <th className="py-2.5 px-3 text-right">
-                          {tr(language, { ru: 'В проекте', en: 'In Formula', it: 'Nella formula', es: 'En fórmula', de: 'In Formel' })}
+                        <th className="py-2 px-2 text-right">
+                          {tr(language, { ru: 'Нужно в формуле', en: 'Required', it: 'Richiesto', es: 'Requerido', de: 'Benötigt' })}
                         </th>
-                        <th className="py-2.5 px-3 text-right">
-                          {tr(language, { ru: 'Запас на складе', en: 'Stock Remaining', it: 'Scorta residua', es: 'Stock restante', de: 'Lagerbestand' })}
+                        <th className="py-2 px-2 text-right">
+                          {tr(language, { ru: 'Остаток на складе', en: 'In Stock', it: 'In magazzino', es: 'En stock', de: 'Lagerbestand' })}
                         </th>
-                        <th className="py-2.5 px-3 text-right">
+                        <th className="py-2 px-2 text-right">
+                          {tr(language, { ru: 'Достаточность', en: 'Availability', it: 'Disponibilità', es: 'Disponibilidad', de: 'Verfügbarkeit' })}
+                        </th>
+                        <th className="py-2 pl-2 pr-3 text-right">
                           {tr(language, { ru: 'Стоимость', en: 'Cost', it: 'Costo', es: 'Coste', de: 'Kosten' })}
                         </th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-[#EDEBE9]">
                       {displayComponents.map((comp) => {
-                        const matched = ingredients.find(
-                          (i) =>
-                            (comp.ingredientId && i.id === comp.ingredientId) ||
-                            i.name.trim().toLowerCase() === comp.name.trim().toLowerCase()
-                        );
+                        const matched = findLinkedIng(comp);
                         const stockVal = matched ? getIngredientStockGrams(matched) : null;
                         const isLow = stockVal !== null && stockVal <= 15;
                         const isWishlist = matched?.status === 'wishlist';
+                        const isShortage = stockVal !== null && comp.weightGrams > stockVal + 0.001;
+                        const deficit = stockVal !== null ? Math.max(0, comp.weightGrams - stockVal) : 0;
+                        const remainingAfter = stockVal !== null ? Math.max(0, stockVal - comp.weightGrams) : 0;
                         const pctFormula =
                           activeSummary.totalWeightGrams > 0
                             ? (comp.weightGrams / activeSummary.totalWeightGrams) * 100
@@ -2527,24 +3479,18 @@ export function ProjectDetail({
                         const compCost = comp.weightGrams * (comp.costPerGram || 0);
 
                         return (
-                          <tr key={comp.id} className="hover:bg-[#FAF9F8] transition-colors">
-                            {/* Component Name & Note */}
-                            <td className="py-2.5 px-3 min-w-[160px]">
+                          <tr key={comp.id} className="hover:bg-[#FAFBF9] transition-colors">
+                            <td className="py-2 pl-3 pr-2 min-w-[160px]">
                               <div className="font-semibold text-[#181917]">{comp.name}</div>
-                              {comp.note && (
-                                <div className="text-[11px] text-[#605E5C] line-clamp-1">
-                                  {comp.note}
-                                </div>
-                              )}
-                              {matched?.inciOrCas && (
-                                <div className="font-mono text-[10px] text-[#797775]">
-                                  {matched.inciOrCas}
+                              {(matched?.inciOrCas || comp.note) && (
+                                <div className="text-[10.5px] text-[#605E5C] truncate max-w-[240px]">
+                                  {matched?.inciOrCas ? `${matched.inciOrCas} · ` : ''}
+                                  {comp.note || ''}
                                 </div>
                               )}
                             </td>
 
-                            {/* Inline Editable Bottle Label */}
-                            <td className="py-2.5 px-3 min-w-[220px]">
+                            <td className="py-2 px-2 min-w-[200px]">
                               <input
                                 type="text"
                                 value={matched?.bottleLabel || ''}
@@ -2563,95 +3509,263 @@ export function ProjectDetail({
                                         ru: 'Подпись на флаконе...',
                                         en: 'Bottle signature...',
                                         it: 'Firma sul flacone...',
-                                        es: 'Firma en el frasco...',
+                                        es: 'Firma en frasco...',
                                         de: 'Flaschenbeschriftung...',
                                       })
                                     : tr(language, {
-                                        ru: 'Не привязан к базе',
-                                        en: 'Not linked to catalog',
-                                        it: 'Non collegato al catalogo',
+                                        ru: 'Не привязан к складу',
+                                        en: 'Not in catalog',
+                                        it: 'Non nel catalogo',
                                         es: 'No vinculado',
                                         de: 'Nicht verknüpft',
                                       })
                                 }
-                                className="w-full rounded border border-[#E1DFDD] bg-white px-2.5 py-1 text-xs text-[#181917] placeholder:text-[#8A8886] focus:border-[var(--theme-accent)] focus:outline-none disabled:bg-[#F3F2F1] disabled:text-[#8A8886]"
+                                className="w-full rounded border border-[#E1DFDD] bg-white px-2 py-1 text-xs text-[#181917] placeholder:text-[#8A8886] focus:border-[var(--theme-accent)] focus:outline-none disabled:bg-[#F3F2F1] disabled:text-[#8A8886]"
                               />
                             </td>
 
-                            {/* Tier & Family */}
-                            <td className="py-2.5 px-3 text-[#575955] whitespace-nowrap">
+                            <td className="py-2 px-2 text-[#575955] whitespace-nowrap">
                               <span className="font-medium text-[#181917]">
                                 {getNoteTierShort(comp.tier, language)}
                               </span>{' '}
                               · {getOlfactoryFamilyShort(comp.family, language)}
                             </td>
 
-                            {/* Dilution */}
-                            <td className="py-2.5 px-3 text-right font-mono tabular-nums text-[#181917]">
+                            <td className="py-2 px-2 text-right font-mono tabular-nums text-[#181917]">
                               {comp.dilutionPercent}%
                             </td>
 
-                            {/* Weight in Project & % */}
-                            <td className="py-2.5 px-3 text-right font-mono tabular-nums">
-                              <div className="font-semibold text-[#181917]">
-                                {comp.weightGrams} г
-                              </div>
-                              <div className="text-[10px] text-[#797775]">
-                                {formatPercent(pctFormula, 1)}
-                              </div>
+                            <td className="py-2 px-2 text-right font-mono tabular-nums whitespace-nowrap">
+                              <span className="font-semibold text-[#181917]">
+                                {formatGrams(comp.weightGrams, 2, language)}
+                              </span>{' '}
+                              <span className="text-[10px] text-[#797775]">
+                                ({formatPercent(pctFormula, 1)})
+                              </span>
                             </td>
 
-                            {/* Stock in Workshop */}
-                            <td className="py-2.5 px-3 text-right font-mono tabular-nums whitespace-nowrap">
+                            <td className="py-2 px-2 text-right font-mono tabular-nums whitespace-nowrap">
                               {matched ? (
                                 isWishlist ? (
-                                  <span className="rounded bg-zinc-100 px-2 py-0.5 text-[10px] font-semibold text-zinc-600">
+                                  <span className="text-[#605E5C]">
                                     {getIngredientStatusLabel('wishlist', language)}
                                   </span>
-                                ) : isLow ? (
-                                  <span className="rounded bg-amber-100 text-amber-800 px-2 py-0.5 text-[11px] font-semibold inline-flex items-center gap-1">
-                                    <AlertTriangle className="h-3 w-3" />
-                                    <span>{stockVal} {formatUnit(matched.unit, language)}</span>
+                                ) : stockVal !== null ? (
+                                  <span
+                                    className={
+                                      isLow
+                                        ? 'font-semibold text-[#B45309]'
+                                        : 'font-medium text-[#15803D]'
+                                    }
+                                  >
+                                    {stockVal} {formatUnit(matched.unit, language)}
                                   </span>
                                 ) : (
-                                  <span className="text-emerald-700 font-medium">
-                                    {stockVal} {formatUnit(matched.unit, language)}
+                                  <span className="text-[#605E5C]">
+                                    {getIngredientStatusLabel(matched.status, language)}
                                   </span>
                                 )
                               ) : (
-                                <span className="text-[#8A8886] text-[10px]">
-                                  {tr(language, { ru: 'ручной ввод', en: 'manual', it: 'manuale', es: 'manual', de: 'manuell' })}
+                                <span className="text-[#8A8886] text-[10.5px]">
+                                  {tr(language, { ru: 'ручной', en: 'manual', it: 'manuale', es: 'manual', de: 'manuell' })}
                                 </span>
                               )}
                             </td>
 
-                            {/* Formula Cost */}
-                            <td className="py-2.5 px-3 text-right font-mono tabular-nums text-[#181917] whitespace-nowrap">
-                              {formatCurrencyRub(compCost, language, currency)}
+                            <td className="py-2 px-2 text-right font-mono tabular-nums whitespace-nowrap">
+                              {(() => {
+                                const needsCart =
+                                  !matched ||
+                                  matched.status !== 'in_stock' ||
+                                  isShortage;
+                                const isStockCompInCart = projectEstimates.some(
+                                  (e) =>
+                                    (comp.ingredientId && e.ingredientId === comp.ingredientId) ||
+                                    e.ingredientName.trim().toLowerCase() === comp.name.trim().toLowerCase()
+                                );
+                                const cartQty = isShortage
+                                  ? Math.max(1, Number(deficit.toFixed(2)))
+                                  : Math.max(1, Number(comp.weightGrams.toFixed(2)));
+
+                                const statusBadge = !matched ? (
+                                  <span className="text-[#8A8886]">
+                                    {tr(language, {
+                                      ru: 'Нет на складе',
+                                      en: 'Not in stock',
+                                      it: 'Non in stock',
+                                      es: 'Sin stock',
+                                      de: 'Nicht vorrätig',
+                                    })}
+                                  </span>
+                                ) : isWishlist ? (
+                                  <span className="text-[#B45309] font-medium">
+                                    {tr(language, { ru: 'Нужно купить', en: 'To buy', it: 'Da comprare', es: 'Por comprar', de: 'Kaufen' })}
+                                  </span>
+                                ) : isShortage ? (
+                                  <span className="inline-flex items-center gap-1 rounded bg-[#FEF2F2] px-1.5 py-0.5 text-[11px] font-semibold text-[#B91C1C]">
+                                    <AlertTriangle className="h-3 w-3 shrink-0" />
+                                    <span>
+                                      {tr(language, { ru: 'Не хватает', en: 'Short', it: 'Mancano', es: 'Falta', de: 'Fehlt' })}{' '}
+                                      {formatGrams(deficit, 2, language)}
+                                    </span>
+                                  </span>
+                                ) : stockVal !== null ? (
+                                  <span className="inline-flex items-center gap-1 text-[#15803D]">
+                                    <Check className="h-3 w-3 shrink-0" />
+                                    <span>
+                                      {tr(language, { ru: 'Ост.', en: 'Left', it: 'Res.', es: 'Rest.', de: 'Rest' })}{' '}
+                                      {formatGrams(remainingAfter, 1, language)}
+                                    </span>
+                                  </span>
+                                ) : (
+                                  <span className="text-[#797775]">—</span>
+                                );
+
+                                return (
+                                  <div className="inline-flex items-center justify-end gap-2">
+                                    {statusBadge}
+                                    {needsCart && onAddToCart && (
+                                      <button
+                                        type="button"
+                                        onClick={() =>
+                                          onAddToCart(
+                                            {
+                                              name: comp.name,
+                                              ingredientId: matched?.id,
+                                              inciOrCas: matched?.inciOrCas,
+                                              family: comp.family,
+                                              tier: comp.tier,
+                                              origin: matched?.origin || 'synthetic',
+                                              dilutionPercent: comp.dilutionPercent,
+                                              requiredGrams: cartQty,
+                                              costPerGram: comp.costPerGram,
+                                              olfactoryNotes: matched?.olfactoryNotes || comp.note,
+                                              odorImpact: comp.odorImpact,
+                                              substantivityHours: comp.substantivityHours,
+                                              scentBreakdown: comp.scentBreakdown,
+                                            },
+                                            project.id
+                                          )
+                                        }
+                                        className={`inline-flex items-center gap-1 rounded border px-2 py-0.5 font-sans text-[11px] font-medium transition-colors ${
+                                          isStockCompInCart
+                                            ? 'border-[#A7F3D0] bg-[#ECFDF5] text-[#15803D]'
+                                            : 'border-[#D2D0CE] bg-white text-[var(--theme-accent)] hover:bg-[var(--theme-accent-soft)]'
+                                        }`}
+                                      >
+                                        {isStockCompInCart ? (
+                                          <Check className="h-3 w-3 shrink-0" />
+                                        ) : (
+                                          <ShoppingCart className="h-3 w-3 shrink-0" />
+                                        )}
+                                        <span>
+                                          {isStockCompInCart
+                                            ? tr(language, {
+                                                ru: 'В корзине',
+                                                en: 'In cart',
+                                                it: 'Nel carrello',
+                                                es: 'En carrito',
+                                                de: 'Im Korb',
+                                              })
+                                            : tr(language, {
+                                                ru: 'В корзину',
+                                                en: 'Add to cart',
+                                                it: 'Al carrello',
+                                                es: 'Al carrito',
+                                                de: 'In Warenkorb',
+                                              })}
+                                        </span>
+                                      </button>
+                                    )}
+                                  </div>
+                                );
+                              })()}
+                            </td>
+
+                            <td className="py-2 pl-2 pr-3 text-right font-mono tabular-nums text-[#181917] whitespace-nowrap">
+                              {formatCurrencyDecimal(compCost, language, currency)}
                             </td>
                           </tr>
                         );
                       })}
+
+                      {displayComponents.length === 0 && (
+                        <tr>
+                          <td colSpan={8} className="py-10 text-center text-xs text-[#787A74]">
+                            {activeComponents.length === 0
+                              ? tr(language, {
+                                  ru: 'В формуле пока нет компонентов — добавьте их через «+» на верхней ленте.',
+                                  en: 'No components yet — use "+" on the top ribbon to add materials.',
+                                  it: 'Nessun componente ancora — usa "+" sulla barra in alto.',
+                                  es: 'Sin componentes aún — usa "+" en la cinta superior.',
+                                  de: 'Noch keine Rohstoffe — über "+" im Menüband hinzufügen.',
+                                })
+                              : tr(language, {
+                                  ru: 'По заданному фильтру ничего не найдено.',
+                                  en: 'No matching components for current filters.',
+                                  it: 'Nessun componente corrispondente.',
+                                  es: 'Ningún componente coincide.',
+                                  de: 'Keine passenden Rohstoffe.',
+                                })}
+                          </td>
+                        </tr>
+                      )}
                     </tbody>
+                    {activeComponents.length > 0 && (
+                      <tfoot>
+                        <tr className="border-t border-[#E4E4E0] bg-[#FAF9F8] text-xs font-semibold text-[#181917] tabular-nums">
+                          <td colSpan={4} className="py-2.5 pl-3 pr-2 text-[#575955]">
+                            {stockAlertCount === 0
+                              ? tr(language, {
+                                  ru: 'Наличие проверено — все привязанные материалы готовы',
+                                  en: 'Stock verified — all linked materials ready',
+                                  it: 'Scorte verificate — materiali pronti',
+                                  es: 'Stock verificado — materiales listos',
+                                  de: 'Bestand geprüft — alle verknüpften Rohstoffe bereit',
+                                })
+                              : tr(language, {
+                                  ru: `Требуют внимания (нехватка / малый остаток / к покупке): ${stockAlertCount}`,
+                                  en: `Attention needed (shortage / low stock / wishlist): ${stockAlertCount}`,
+                                  it: `Richiedono attenzione: ${stockAlertCount}`,
+                                  es: `Requieren atención: ${stockAlertCount}`,
+                                  de: `Aufmerksamkeit erforderlich: ${stockAlertCount}`,
+                                })}
+                          </td>
+                          <td className="py-2.5 px-2 text-right font-mono">
+                            {formatGrams(activeSummary.totalWeightGrams, 2, language)}
+                          </td>
+                          <td colSpan={2} />
+                          <td className="py-2.5 pl-2 pr-3 text-right font-mono">
+                            {formatCurrencyDecimal(activeSummary.totalFormulaCost, language, currency)}
+                          </td>
+                        </tr>
+                      </tfoot>
+                    )}
                   </table>
                 </div>
               )}
-            </section>
+            </div>
           </div>
         );
       })()}
 
-      {/* TAB 2: OLFACTORY MAP */}
+      {/* TAB 2: OLFACTORY MAP & PROFILE */}
       {activeTab === 'olfactory' && (
-        <OlfactoryMapBuilder
-          project={project}
-          allProjects={allProjects}
-          onSwitchProject={onSwitchProject}
-          ingredients={ingredients}
-          library={library}
-          onUpdateMap={(nextMap) => patchProject({ olfactoryMap: nextMap })}
-          language={language}
-        />
+        <div className="space-y-6">
+          <OlfactoryMapBuilder
+            project={project}
+            allProjects={allProjects}
+            onSwitchProject={onSwitchProject}
+            ingredients={ingredients}
+            library={library}
+            onUpdateMap={(nextMap) => patchProject({ olfactoryMap: nextMap })}
+            language={language}
+            activeComponents={activeComponents}
+            selectedVariantId={selectedVariantId}
+            onSelectVariantId={setSelectedVariantId}
+            onGoToFormulaInput={goToFormulaInput}
+          />
+        </div>
       )}
 
       {/* TAB 3: PROJECT JOURNAL / NOTES */}
@@ -3224,7 +4338,18 @@ export function ProjectDetail({
                     );
                     const boughtQty = matched.reduce((s, p) => s + p.quantity, 0);
                     const boughtSum = matched.reduce((s, p) => s + p.totalCost, 0);
-                    const plannedSum = item.requiredQuantity * item.estimatedUnitPrice;
+                    const linkedStockIng = ingredients.find(
+                      (i) =>
+                        (item.ingredientId && i.id === item.ingredientId) ||
+                        i.name.trim().toLowerCase() === item.ingredientName.trim().toLowerCase()
+                    );
+                    const effectiveUnitPrice =
+                      item.estimatedUnitPrice > 0
+                        ? item.estimatedUnitPrice
+                        : linkedStockIng && linkedStockIng.quantityGrams > 0 && linkedStockIng.priceTotal > 0
+                          ? Number((linkedStockIng.priceTotal / linkedStockIng.quantityGrams).toFixed(2))
+                          : 0;
+                    const plannedSum = item.requiredQuantity * effectiveUnitPrice;
                     const isCovered = boughtQty >= item.requiredQuantity && item.requiredQuantity > 0;
                     const isPartial = boughtQty > 0 && !isCovered;
                     const unitLabel = formatUnit(item.unit, language);
@@ -3244,7 +4369,7 @@ export function ProjectDetail({
                           {item.requiredQuantity} {unitLabel}
                         </td>
                         <td className="py-3 px-2 text-right font-mono text-xs tabular-nums text-[#575955]">
-                          {formatCurrencyDecimal(item.estimatedUnitPrice, language, currency)}
+                          {formatCurrencyDecimal(effectiveUnitPrice, language, currency)}
                         </td>
                         <td className="py-3 px-2 text-right font-mono text-xs font-medium tabular-nums">
                           {formatCurrencyRub(plannedSum, language, currency)}
@@ -3424,43 +4549,16 @@ export function ProjectDetail({
                   className="rounded-lg border border-[#E4E4E0] bg-white px-3 py-2 text-xs text-[#3F413D] focus:border-[var(--theme-accent)] focus:outline-none"
                 >
                   <option value="">{t.chooseFromCatalogOption}</option>
-                  {ingredients
-                    .filter((i) => {
-                      const q = estPickerSearch.trim().toLowerCase();
-                      if (!q) return true;
-                      return (
-                        i.name.toLowerCase().includes(q) ||
-                        (i.bottleLabel || '').toLowerCase().includes(q) ||
-                        (i.inciOrCas || '').toLowerCase().includes(q)
-                      );
-                    })
-                    .map((i) => (
-                      <option key={i.id} value={i.id}>
-                        {i.name}
-                      </option>
-                    ))}
-                  {library
-                    .filter((l) => {
-                      if (
-                        ingredients.some(
-                          (ing) => ing.name.trim().toLowerCase() === l.name.trim().toLowerCase()
-                        )
-                      ) {
-                        return false;
-                      }
-                      const q = estPickerSearch.trim().toLowerCase();
-                      if (!q) return true;
-                      return (
-                        l.name.toLowerCase().includes(q) ||
-                        (l.inciOrCas || '').toLowerCase().includes(q)
-                      );
-                    })
-                    .slice(0, 60)
-                    .map((l) => (
-                      <option key={`est-lib-${l.id}`} value={`lib:${l.id}`}>
-                        [{language === 'ru' ? 'Библиотека' : 'Library'}] {l.name}
-                      </option>
-                    ))}
+                  {estSelectOptions.ingList.map((i) => (
+                    <option key={i.id} value={i.id}>
+                      {i.name}
+                    </option>
+                  ))}
+                  {estSelectOptions.libList.map((l) => (
+                    <option key={`est-lib-${l.id}`} value={`lib:${l.id}`}>
+                      [{language === 'ru' ? 'Библиотека' : 'Library'}] {l.name}
+                    </option>
+                  ))}
                 </select>
                 <input
                   type="text"
@@ -3545,21 +4643,94 @@ export function ProjectDetail({
         </div>
       )}
 
+      {/* TAB: DILUTION CALCULATORS */}
       {activeTab === 'dilution' && (
-        <IngredientDilutionCalculator
-          ingredients={ingredients}
-          projects={allProjects}
-          language={language}
-          currency={currency}
-          activeProject={project}
-          onAddToProjectFormula={(_, comp) => {
-            patchProject({
-              components: [...project.components, comp],
-            });
-          }}
-          onSaveDilutedIngredient={onSaveDilutedIngredient}
-          onToast={onToast}
-        />
+        <div className="space-y-6">
+          <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-[#E4E4E0] bg-white px-4 py-3">
+            <div className="flex flex-wrap items-center gap-x-5 gap-y-1 text-xs text-[#575955] tabular-nums">
+              <span>
+                {tr(language, {
+                  ru: 'Концентрат:',
+                  en: 'Concentrate:',
+                  it: 'Concentrato:',
+                  es: 'Concentrado:',
+                  de: 'Konzentrat:',
+                })}{' '}
+                <strong className="font-mono text-[#181917]">
+                  {formatGrams(activeSummary.aromaticMixtureGrams, 2, language)}
+                </strong>
+              </span>
+              <span>
+                {tr(language, {
+                  ru: 'Растворитель / спирт:',
+                  en: 'Solvent / alcohol:',
+                  it: 'Solvente / alcol:',
+                  es: 'Disolvente / alcohol:',
+                  de: 'Lösungsmittel / Alkohol:',
+                })}{' '}
+                <strong className="font-mono text-[#181917]">
+                  {formatGrams(
+                    Math.max(0, activeSummary.totalWeightGrams - activeSummary.aromaticMixtureGrams),
+                    2,
+                    language
+                  )}
+                </strong>
+              </span>
+              <span>
+                {tr(language, {
+                  ru: 'Текущая концентрация:',
+                  en: 'Current concentration:',
+                  it: 'Concentrazione attuale:',
+                  es: 'Concentración actual:',
+                  de: 'Aktuelle Konzentration:',
+                })}{' '}
+                <strong className="font-mono text-[var(--theme-accent)]">
+                  {formatPercent(activeSummary.pureConcentrationPercent, 1)}
+                </strong>
+              </span>
+            </div>
+
+            <button
+              type="button"
+              disabled={activeSummary.pureAromaticGrams <= 0}
+              onClick={handleAdjustSolventToTargetConcentration}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-[#D2D0CE] bg-white px-3 py-1.5 text-xs font-semibold text-[#181917] hover:bg-[#F3F2F1] hover:border-[var(--theme-accent)] disabled:opacity-40 disabled:cursor-not-allowed transition-colors whitespace-nowrap"
+              title={t.matchAlcoholTitle(
+                CONCENTRATION_TARGET_PERCENT[project.targetConcentration].defaultPct
+              )}
+            >
+              <Droplets className="h-3.5 w-3.5 text-[var(--theme-accent)] shrink-0" />
+              <span>
+                {t.matchAlcoholBtn(
+                  project.targetConcentration,
+                  CONCENTRATION_TARGET_PERCENT[project.targetConcentration].defaultPct
+                )}
+              </span>
+            </button>
+          </div>
+
+          <SolventDilutionCalculator
+            projects={allProjects}
+            ingredients={ingredients}
+            language={language}
+            lockedProjectId={project.id}
+            onUpdateProject={onUpdateProject}
+          />
+          <IngredientDilutionCalculator
+            ingredients={ingredients}
+            projects={allProjects}
+            language={language}
+            currency={currency}
+            activeProject={project}
+            onAddToProjectFormula={(_, comp) => {
+              patchProject({
+                components: [...project.components, comp],
+              });
+            }}
+            onSaveDilutedIngredient={onSaveDilutedIngredient}
+            onToast={onToast}
+          />
+        </div>
       )}
     </div>
   );

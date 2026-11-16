@@ -24,10 +24,17 @@ export type MeasurementUnit = 'г' | 'мл' | 'кг' | 'шт';
 
 export type SillageLevel = 'intimate' | 'moderate' | 'strong';
 
+export interface ScentFacetBreakdown {
+  facet: string;
+  family: OlfactoryFamilyKey;
+  percent: number;
+}
+
 export interface Ingredient {
   id: string;
   name: string;
   inciOrCas?: string;
+  synonyms?: string[];
   family: OlfactoryFamilyKey;
   tier: NoteTier;
   origin: IngredientOrigin;
@@ -42,6 +49,10 @@ export interface Ingredient {
   previousPriceDate?: string;
   longevityLabel: string;
   sillage: SillageLevel;
+  odorImpact?: number;
+  substantivityHours?: number;
+  averageUsePercent?: string;
+  scentBreakdown?: ScentFacetBreakdown[];
   ifraLimitPercent?: number;
   supplier?: string;
   purchaseUrl?: string;
@@ -62,6 +73,9 @@ export interface FormulaComponent {
   dilutionPercent: number;
   weightGrams: number;
   costPerGram?: number;
+  odorImpact?: number;
+  substantivityHours?: number;
+  scentBreakdown?: ScentFacetBreakdown[];
   note?: string;
 }
 
@@ -115,10 +129,17 @@ export interface LibraryIngredient {
   id: string;
   name: string;
   inciOrCas?: string;
+  synonyms?: string[];
   family: OlfactoryFamilyKey;
   tier: NoteTier;
   origin: IngredientOrigin;
   blotterLongevity?: string;
+  odorImpact?: number;
+  substantivityHours?: number;
+  averageUsePercent?: string;
+  scentBreakdown?: ScentFacetBreakdown[];
+  ifraLimitPercent?: number;
+  ifraNote?: string;
   properties: string;
   scentDescription: string;
   scentRating: number;
@@ -215,8 +236,14 @@ export interface PerfumeProject {
   status: ProjectStatus;
   targetConcentration: ConcentrationType;
   targetBottleMl: number;
+  targetConcentrateGrams?: number;
   idea: string;
   inspiration: string;
+  desiredNotes?: {
+    top: string;
+    heart: string;
+    base: string;
+  };
   components: FormulaComponent[];
   olfactoryMap: OlfactoryMapData;
   journal: JournalEntry[];
@@ -244,7 +271,14 @@ export type AppSection =
   | 'statistics'
   | 'sales'
   | 'dilution';
-export type ProjectTab = 'formula' | 'ingredients' | 'olfactory' | 'journal' | 'cost' | 'dilution';
+export type ProjectTab =
+  | 'formula'
+  | 'ingredients'
+  | 'olfactory'
+  | 'journal'
+  | 'cost'
+  | 'dilution'
+  | 'management';
 
 export interface ViewSettings {
   showStatusBar: boolean;
@@ -303,6 +337,8 @@ export interface AppSettings {
   colorMode: ColorMode;
   homeSections: HomeSectionsSettings;
   criticalStockGrams: number;
+  defaultConcentrateGrams?: number;
+  bottleVolumesMl?: number[];
   lastBackupAt?: string;
 }
 

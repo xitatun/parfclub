@@ -4,6 +4,7 @@ import {
   BarChart3,
   Beaker,
   BellRing,
+  BookMarked,
   BookOpen,
   Calculator,
   Check,
@@ -22,6 +23,7 @@ import {
   FolderKanban,
   FolderOpen,
   Globe,
+  GraduationCap,
   Home,
   LayoutGrid,
   Moon,
@@ -31,6 +33,7 @@ import {
   Printer,
   RotateCcw,
   Save,
+  Scale,
   Search,
   Settings,
   Sun,
@@ -41,6 +44,7 @@ import {
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   CURRENCY_OPTIONS,
+  DEFAULT_BOTTLE_VOLUMES_ML,
   formatUnit,
   getJournalVerdictLabel,
   getProjectStatusLabel,
@@ -68,17 +72,22 @@ import {
   getMacerationStatus,
 } from '../utils/calculations';
 import { generateId, todayIsoDate } from '../utils/storage';
+import { STARTER_FORMULAS, type StarterFormulaSpec } from '../data/starterFormulasData';
 import { BudgetEstimate } from './BudgetEstimate';
 import { IngredientDilutionCalculator } from './IngredientDilutionCalculator';
 import { IngredientLibrary } from './IngredientLibrary';
+import { JeanCarlesMethodGuide } from './JeanCarlesMethodGuide';
 import { OfflineStatusCard } from './PWAInstallButton';
 import { SalesStatistics } from './SalesStatistics';
+import { StarterFormulasCatalog } from './StarterFormulasCatalog';
 import { StudioStatistics } from './StudioStatistics';
 
 export type BackstageTab =
   | 'home'
   | 'ingredients'
   | 'library'
+  | 'formulas'
+  | 'literature'
   | 'budget'
   | 'statistics'
   | 'sales'
@@ -103,6 +112,10 @@ interface WordFileBackstageProps {
   onChangeHomeSections: (patch: Partial<HomeSectionsSettings>) => void;
   criticalStockGrams: number;
   onChangeCriticalStockGrams: (grams: number) => void;
+  defaultConcentrateGrams?: number;
+  onChangeDefaultConcentrateGrams?: (grams: number) => void;
+  bottleVolumesMl?: number[];
+  onChangeBottleVolumesMl?: (volumes: number[]) => void;
   lastBackupAt?: string;
   selectedProject: PerfumeProject | null;
   projects: PerfumeProject[];
@@ -158,6 +171,21 @@ interface WordFileBackstageProps {
   studioName?: string;
   onChangeStudioName?: (name: string) => void;
   renderIngredientsCatalog?: () => React.ReactNode;
+  onCreateProjectFromFormula?: (
+    formula: StarterFormulaSpec,
+    targetConcentrateGrams: number,
+    includeSolvent: boolean
+  ) => void;
+  onAppendFormulaToProject?: (
+    formula: StarterFormulaSpec,
+    targetConcentrateGrams: number,
+    includeSolvent: boolean,
+    targetProjectId?: string
+  ) => void;
+  onAddStarterIngredientToCart?: (
+    spec: StarterFormulaSpec['components'][number],
+    neededGrams: number
+  ) => void;
 }
 
 const BACKSTAGE_TEXT: Record<
@@ -1029,10 +1057,26 @@ export function WordFileBackstage({
   onToast,
   studioName,
   onChangeStudioName,
+  defaultConcentrateGrams = 10,
+  onChangeDefaultConcentrateGrams,
+  bottleVolumesMl = DEFAULT_BOTTLE_VOLUMES_ML,
+  onChangeBottleVolumesMl,
   renderIngredientsCatalog,
+  onCreateProjectFromFormula,
+  onAppendFormulaToProject,
+  onAddStarterIngredientToCart,
 }: WordFileBackstageProps) {
   const [activeTab, setActiveTab] = useState<BackstageTab>(initialTab);
+  const [selectedFormulaFromLiterature, setSelectedFormulaFromLiterature] = useState<string | null>(
+    null
+  );
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const [newBottleMlDraft, setNewBottleMlDraft] = useState('');
+
+  const jeanCarlesFormulas = useMemo(
+    () => STARTER_FORMULAS.filter((f) => f.source === 'Jean Carles'),
+    []
+  );
 
   // Quick add maceration timer state on Home tab
   const [showNewTimer, setShowNewTimer] = useState(false);
@@ -1330,6 +1374,55 @@ export function WordFileBackstage({
                   {library.length}
                 </span>
               )}
+            </button>
+
+            <button
+              type="button"
+              onClick={() => handleSelectTab('formulas')}
+              className={`flex items-center justify-between gap-2 rounded-md px-3.5 py-2.5 text-xs font-medium transition-colors whitespace-nowrap text-left ${
+                activeTab === 'formulas'
+                  ? 'bg-white/20 text-white font-semibold'
+                  : 'text-white/85 hover:bg-white/10 hover:text-white'
+              }`}
+            >
+              <span className="flex items-center gap-3">
+                <BookMarked className="h-4 w-4 shrink-0" />
+                <span>
+                  {tr(language, {
+                    ru: 'Готовые формулы',
+                    en: 'Starter Formulas',
+                    it: 'Formule Pronte',
+                    es: 'Fórmulas Listas',
+                    de: 'Fertige Formeln',
+                  })}
+                </span>
+              </span>
+              <span className="rounded px-1.5 py-0.5 bg-white/15 font-mono text-[10px] tabular-nums text-white/95">
+                {STARTER_FORMULAS.length}
+              </span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => handleSelectTab('literature')}
+              className={`flex items-center justify-between gap-2 rounded-md px-3.5 py-2.5 text-xs font-medium transition-colors whitespace-nowrap text-left ${
+                activeTab === 'literature'
+                  ? 'bg-white/20 text-white font-semibold'
+                  : 'text-white/85 hover:bg-white/10 hover:text-white'
+              }`}
+            >
+              <span className="flex items-center gap-3">
+                <GraduationCap className="h-4 w-4 shrink-0" />
+                <span>
+                  {tr(language, {
+                    ru: 'Литература',
+                    en: 'Literature',
+                    it: 'Letteratura',
+                    es: 'Literatura',
+                    de: 'Literatur',
+                  })}
+                </span>
+              </span>
             </button>
 
             <button
@@ -2237,120 +2330,194 @@ export function WordFileBackstage({
           {activeTab === 'dilution' && (
             <div className="p-6">
               <IngredientDilutionCalculator
-                ingredients={ingredients}
-                projects={projects}
-                language={language}
-                currency={currency}
-                onAddToProjectFormula={(projectId, comp) => {
-                  const proj = projects.find((p) => p.id === projectId);
-                  if (proj && onUpdateProject) {
-                    onUpdateProject({
-                      ...proj,
-                      components: [...proj.components, comp],
-                      updatedAt: todayIsoDate(),
-                    });
+                  ingredients={ingredients}
+                  projects={projects}
+                  language={language}
+                  currency={currency}
+                  onAddToProjectFormula={(projectId, comp) => {
+                    const proj = projects.find((p) => p.id === projectId);
+                    if (proj && onUpdateProject) {
+                      onUpdateProject({
+                        ...proj,
+                        components: [...proj.components, comp],
+                        updatedAt: todayIsoDate(),
+                      });
+                      onToast?.(
+                        tr(language, {
+                          ru: `Ингредиент добавлен в формулу ${proj.code}`,
+                          en: `Ingredient added to ${proj.code}`,
+                          it: `Ingrediente aggiunto a ${proj.code}`,
+                          es: `Ingrediente añadido a ${proj.code}`,
+                          de: `Rohstoff zu ${proj.code} hinzugefügt`,
+                        })
+                      );
+                    }
+                  }}
+                  onSaveDilutedIngredient={(ing) => {
+                    onUpdateIngredient?.(ing);
                     onToast?.(
                       tr(language, {
-                        ru: `Ингредиент добавлен в формулу ${proj.code}`,
-                        en: `Ingredient added to ${proj.code}`,
-                        it: `Ingrediente aggiunto a ${proj.code}`,
-                        es: `Ingrediente añadido a ${proj.code}`,
-                        de: `Rohstoff zu ${proj.code} hinzugefügt`,
+                        ru: 'Разведённый ингредиент сохранён в базу',
+                        en: 'Diluted ingredient saved to catalog',
+                        it: 'Ingrediente diluito salvato',
+                        es: 'Ingrediente diluido guardado',
+                        de: 'Verdünnter Rohstoff gespeichert',
                       })
                     );
-                  }
-                }}
-                onSaveDilutedIngredient={(ing) => {
-                  onUpdateIngredient?.(ing);
-                  onToast?.(
-                    tr(language, {
-                      ru: 'Разведённый ингредиент сохранён в базу',
-                      en: 'Diluted ingredient saved to catalog',
-                      it: 'Ingrediente diluito salvato',
-                      es: 'Ingrediente diluido guardado',
-                      de: 'Verdünnter Rohstoff gespeichert',
-                    })
-                  );
-                }}
-                onToast={onToast}
-              />
+                  }}
+                  onToast={onToast}
+                />
             </div>
           )}
 
           {/* TAB 0.25: INGREDIENT LIBRARY */}
           {activeTab === 'library' && (
             <IngredientLibrary
-              library={library}
-              studioIngredients={ingredients}
+                library={library}
+                studioIngredients={ingredients}
+                projects={projects}
+                selectedProjectId={selectedProject?.id || null}
+                language={language}
+                onAddLibraryItem={onAddLibraryItem}
+                onUpdateLibraryItem={onUpdateLibraryItem}
+                onDeleteLibraryItem={onDeleteLibraryItem}
+                onAddToStudioWishlist={onAddLibraryItemToWishlist}
+                onAddToProjectFormula={(libItem, projectId, weightGrams) => {
+                  const targetProj = projects.find((p) => p.id === projectId);
+                  if (!targetProj || !onUpdateProject) return;
+                  const matchedIng = ingredients.find(
+                    (i) => i.name.trim().toLowerCase() === libItem.name.trim().toLowerCase()
+                  );
+                  const unitCost =
+                    matchedIng && matchedIng.quantityGrams > 0
+                      ? matchedIng.priceTotal / matchedIng.quantityGrams
+                      : 0;
+                  const newComp = {
+                    id: generateId('fc'),
+                    ingredientId: matchedIng?.id,
+                    name: libItem.name,
+                    tier: libItem.tier,
+                    family: libItem.family,
+                    dilutionPercent: matchedIng ? matchedIng.dilutionPercent : 100,
+                    weightGrams: Math.max(0.01, Number(weightGrams) || 0.5),
+                    costPerGram: Number(unitCost.toFixed(2)),
+                    odorImpact: libItem.odorImpact,
+                    substantivityHours: libItem.substantivityHours,
+                    scentBreakdown: libItem.scentBreakdown,
+                    note: libItem.scentDescription ? libItem.scentDescription.slice(0, 80) : undefined,
+                  };
+                  onUpdateProject({
+                    ...targetProj,
+                    components: [...targetProj.components, newComp],
+                    updatedAt: todayIsoDate(),
+                  });
+                  onToast?.(
+                    tr(language, {
+                      ru: `«${libItem.name}» добавлен в формулу ${targetProj.code}`,
+                      en: `Added "${libItem.name}" to ${targetProj.code}`,
+                      it: `Aggiunto "${libItem.name}" a ${targetProj.code}`,
+                      es: `Añadido "${libItem.name}" a ${targetProj.code}`,
+                      de: `"${libItem.name}" zu ${targetProj.code} hinzugefügt`,
+                    })
+                  );
+                }}
+              />
+          )}
+
+          {/* TAB 0.32: STARTER FORMULAS CATALOG */}
+          {activeTab === 'formulas' && (
+            <StarterFormulasCatalog
               language={language}
-              onAddLibraryItem={onAddLibraryItem}
-              onUpdateLibraryItem={onUpdateLibraryItem}
-              onDeleteLibraryItem={onDeleteLibraryItem}
-              onAddToStudioWishlist={onAddLibraryItemToWishlist}
+              ingredients={ingredients}
+              projects={projects}
+              selectedProject={selectedProject}
+              defaultConcentrateGrams={defaultConcentrateGrams}
+              initialSelectedFormulaId={selectedFormulaFromLiterature}
+              onCreateProjectFromFormula={(formula, targetGrams, includeSolvent) => {
+                onCreateProjectFromFormula?.(formula, targetGrams, includeSolvent);
+                onClose();
+              }}
+              onAppendFormulaToProject={(formula, targetGrams, includeSolvent, targetProjectId) => {
+                onAppendFormulaToProject?.(formula, targetGrams, includeSolvent, targetProjectId);
+                onClose();
+              }}
+              onAddIngredientToCart={onAddStarterIngredientToCart}
+            />
+          )}
+
+          {/* TAB 0.33: LITERATURE & JEAN CARLES METHOD */}
+          {activeTab === 'literature' && (
+            <JeanCarlesMethodGuide
+              language={language}
+              jeanCarlesFormulas={jeanCarlesFormulas}
+              onSelectFormulaInCatalog={(formulaId: string) => {
+                setSelectedFormulaFromLiterature(formulaId);
+                handleSelectTab('formulas');
+              }}
             />
           )}
 
           {/* TAB 0.35: BUDGET ESTIMATE IN FILE SECTION */}
           {activeTab === 'budget' && (
             <BudgetEstimate
-              projects={projects}
-              ingredients={ingredients}
-              estimates={estimates}
-              purchases={purchases}
-              language={language}
-              currency={currency}
-              onAddEstimateItem={(item) => onAddEstimateItem?.(item)}
-              onDeleteEstimateItem={(id) => onDeleteEstimateItem?.(id)}
-              onAddPurchaseRecord={(record) => onAddPurchaseRecord?.(record)}
-              onDeletePurchaseRecord={(id) => onDeletePurchaseRecord?.(id)}
-              onUpdateProject={(proj) => onUpdateProject?.(proj)}
-              onToast={onToast}
-            />
+                projects={projects}
+                ingredients={ingredients}
+                estimates={estimates}
+                purchases={purchases}
+                language={language}
+                currency={currency}
+                onAddEstimateItem={(item) => onAddEstimateItem?.(item)}
+                onDeleteEstimateItem={(id) => onDeleteEstimateItem?.(id)}
+                onAddPurchaseRecord={(record) => onAddPurchaseRecord?.(record)}
+                onDeletePurchaseRecord={(id) => onDeletePurchaseRecord?.(id)}
+                onUpdateProject={(proj) => onUpdateProject?.(proj)}
+                onToast={onToast}
+              />
           )}
 
           {/* TAB 0.5: STUDIO STATISTICS */}
           {activeTab === 'statistics' && (
             <StudioStatistics
-              projects={projects}
-              ingredients={ingredients}
-              estimates={estimates}
-              purchases={purchases}
-              language={language}
-              currency={currency}
-              onOpenProject={(projectId, tab) => {
-                onOpenProject(projectId, tab);
-                onClose();
-              }}
-              onOpenIngredients={() => {
-                onOpenIngredients();
-                onClose();
-              }}
-              onOpenBudget={() => {
-                onOpenBudget();
-                onClose();
-              }}
-              onOpenProjectsOverview={() => {
-                onOpenProjectsOverview();
-                onClose();
-              }}
-            />
+                projects={projects}
+                ingredients={ingredients}
+                estimates={estimates}
+                purchases={purchases}
+                language={language}
+                currency={currency}
+                onOpenProject={(projectId, tab) => {
+                  onOpenProject(projectId, tab);
+                  onClose();
+                }}
+                onOpenIngredients={() => {
+                  onOpenIngredients();
+                  onClose();
+                }}
+                onOpenBudget={() => {
+                  onOpenBudget();
+                  onClose();
+                }}
+                onOpenProjectsOverview={() => {
+                  onOpenProjectsOverview();
+                  onClose();
+                }}
+              />
           )}
 
           {/* TAB 0.75: SALES STATISTICS */}
           {activeTab === 'sales' && (
             <SalesStatistics
-              projects={projects}
-              sales={sales}
-              language={language}
-              currency={currency}
-              onAddSale={onAddSale}
-              onImportSales={onImportSales}
-              onDeleteSale={onDeleteSale}
-              onOpenProject={(projectId, tab) => {
-                onOpenProject(projectId, tab);
-                onClose();
-              }}
-            />
+                projects={projects}
+                sales={sales}
+                language={language}
+                currency={currency}
+                onAddSale={onAddSale}
+                onImportSales={onImportSales}
+                onDeleteSale={onDeleteSale}
+                onOpenProject={(projectId, tab) => {
+                  onOpenProject(projectId, tab);
+                  onClose();
+                }}
+              />
           )}
 
           {/* TAB 1: FILE MANAGEMENT */}
@@ -2754,6 +2921,213 @@ export function WordFileBackstage({
                       </span>
                     </button>
                   )}
+                </div>
+              </section>
+
+              {/* Base Perfume Concentrate Weight Setting */}
+              <section className="rounded-xl border border-[#E1DFDD] bg-white p-6 space-y-4">
+                <div className="flex items-start gap-3">
+                  <Scale className="h-5 w-5 text-[var(--theme-accent)] shrink-0 mt-0.5" />
+                  <div>
+                    <h2 className="text-base font-semibold text-[#181917]">
+                      {tr(language, {
+                        ru: 'Базовый вес парфюмерного концентрата',
+                        en: 'Default Perfume Concentrate Weight',
+                        it: 'Peso base del concentrato',
+                        es: 'Peso base del concentrado',
+                        de: 'Basisgewicht des Parfümkonzentrats',
+                      })}
+                    </h2>
+                    <p className="mt-0.5 text-xs text-[#605E5C]">
+                      {tr(language, {
+                        ru: 'Используется по умолчанию при создании новых формул для расчёта граммов компонентов по их процентному соотношению в концентрате.',
+                        en: 'Used as the starting batch target for new formulas to compute ingredient grams from concentrate percentages.',
+                        it: 'Usato come peso predefinito per le nuove formule per calcolare i grammi dalle percentuali nel concentrato.',
+                        es: 'Se usa como peso inicial en nuevas fórmulas para calcular los gramos según el porcentaje en el concentrado.',
+                        de: 'Wird als Standard-Startgewicht neuer Formeln genutzt, um Grammwerte aus Prozentanteilen im Konzentrat zu berechnen.',
+                      })}
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-3">
+                  <div className="inline-flex items-center gap-1.5 rounded-lg border border-[#E1DFDD] bg-[#FAF9F8] px-3 py-1.5 focus-within:border-[var(--theme-accent)] focus-within:bg-white">
+                    <input
+                      type="number"
+                      min={0.5}
+                      max={5000}
+                      step="0.5"
+                      value={defaultConcentrateGrams}
+                      onChange={(e) => {
+                        const next = Number(e.target.value);
+                        if (Number.isFinite(next) && next > 0) {
+                          onChangeDefaultConcentrateGrams?.(next);
+                        }
+                      }}
+                      className="w-20 bg-transparent text-right font-mono text-sm font-semibold text-[#181917] focus:outline-none tabular-nums"
+                      aria-label={tr(language, {
+                        ru: 'Базовый вес парфюмерного концентрата (г)',
+                        en: 'Default perfume concentrate weight (g)',
+                        it: 'Peso base del concentrato (g)',
+                        es: 'Peso base del concentrado (g)',
+                        de: 'Basisgewicht des Parfümkonzentrats (g)',
+                      })}
+                    />
+                    <span className="text-xs font-medium text-[#605E5C]">
+                      {formatUnit('г', language)}
+                    </span>
+                  </div>
+
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    {[5, 10, 15, 20, 30, 50, 100].map((preset) => {
+                      const active = Math.abs(defaultConcentrateGrams - preset) < 0.01;
+                      return (
+                        <button
+                          key={preset}
+                          type="button"
+                          onClick={() => onChangeDefaultConcentrateGrams?.(preset)}
+                          className={`rounded-md border px-2.5 py-1.5 font-mono text-xs transition-colors ${
+                            active
+                              ? 'border-[var(--theme-accent)] bg-[var(--theme-accent-soft)] font-semibold text-[var(--theme-accent)]'
+                              : 'border-[#E1DFDD] bg-[#FAF9F8] text-[#323130] hover:bg-white'
+                          }`}
+                        >
+                          {preset} {formatUnit('г', language)}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              </section>
+
+              {/* Bottle Volume Presets Setting */}
+              <section className="rounded-xl border border-[#E1DFDD] bg-white p-6 space-y-4">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="flex items-start gap-3">
+                    <FlaskConical className="h-5 w-5 text-[var(--theme-accent)] shrink-0 mt-0.5" />
+                    <div>
+                      <h2 className="text-base font-semibold text-[#181917]">
+                        {tr(language, {
+                          ru: 'Настройка флаконов (объёмы, мл)',
+                          en: 'Bottle Sizes (ml)',
+                          it: 'Configurazione Flaconi (ml)',
+                          es: 'Configuración de Frascos (ml)',
+                          de: 'Flakon-Größen (ml)',
+                        })}
+                      </h2>
+                      <p className="mt-0.5 text-xs text-[#605E5C]">
+                        {tr(language, {
+                          ru: 'Список стандартных объёмов флаконов, из которого выбирается объём проекта на ленте инструментов.',
+                          en: 'Standard bottle volumes available in the Ribbon bottle volume dropdown for projects.',
+                          it: 'Elenco dei volumi standard dei flaconi selezionabili dalla barra multifunzione.',
+                          es: 'Lista de volúmenes estándar de frascos disponibles en el selector de la cinta.',
+                          de: 'Liste der Standard-Flakonvolumina für die Auswahl im Menüband.',
+                        })}
+                      </p>
+                    </div>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => onChangeBottleVolumesMl?.([...DEFAULT_BOTTLE_VOLUMES_ML])}
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-[#E1DFDD] bg-white px-2.5 py-1.5 text-xs font-medium text-[#605E5C] hover:bg-[#F3F2F1] hover:text-[#181917] shrink-0"
+                  >
+                    <RotateCcw className="h-3.5 w-3.5" />
+                    <span>
+                      {tr(language, {
+                        ru: 'По умолчанию',
+                        en: 'Reset default',
+                        it: 'Predefinito',
+                        es: 'Por defecto',
+                        de: 'Standard',
+                      })}
+                    </span>
+                  </button>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2">
+                  {bottleVolumesMl.map((vol) => (
+                    <div
+                      key={vol}
+                      className="inline-flex items-center gap-1.5 rounded-lg border border-[#E1DFDD] bg-[#FAF9F8] pl-3 pr-1.5 py-1.5 font-mono text-xs font-semibold text-[#181917] tabular-nums"
+                    >
+                      <span>
+                        {vol} {formatUnit('мл', language)}
+                      </span>
+                      {bottleVolumesMl.length > 1 && (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            onChangeBottleVolumesMl?.(bottleVolumesMl.filter((v) => v !== vol))
+                          }
+                          aria-label={`${vol} ${formatUnit('мл', language)}`}
+                          className="rounded p-0.5 text-[#797775] hover:bg-[#E1DFDD] hover:text-[#B91C1C] transition-colors"
+                        >
+                          <Trash2 className="h-3 w-3" />
+                        </button>
+                      )}
+                    </div>
+                  ))}
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2 pt-1">
+                  <div className="inline-flex items-center gap-1.5 rounded-lg border border-[#E1DFDD] bg-[#FAF9F8] px-3 py-1.5 focus-within:border-[var(--theme-accent)] focus-within:bg-white">
+                    <input
+                      type="number"
+                      min={1}
+                      max={2000}
+                      step="1"
+                      value={newBottleMlDraft}
+                      onChange={(e) => setNewBottleMlDraft(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          e.preventDefault();
+                          const val = Math.round(Number(newBottleMlDraft));
+                          if (Number.isFinite(val) && val > 0 && val <= 2000) {
+                            const next = Array.from(new Set([...bottleVolumesMl, val])).sort(
+                              (a, b) => a - b
+                            );
+                            onChangeBottleVolumesMl?.(next);
+                            setNewBottleMlDraft('');
+                          }
+                        }
+                      }}
+                      placeholder={tr(language, {
+                        ru: 'Напр., 75',
+                        en: 'e.g. 75',
+                        it: 'es. 75',
+                        es: 'ej. 75',
+                        de: 'z. B. 75',
+                      })}
+                      className="w-24 bg-transparent font-mono text-xs text-[#181917] placeholder:text-[#8B8D87] focus:outline-none tabular-nums"
+                    />
+                    <span className="text-xs text-[#605E5C]">{formatUnit('мл', language)}</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const val = Math.round(Number(newBottleMlDraft));
+                      if (Number.isFinite(val) && val > 0 && val <= 2000) {
+                        const next = Array.from(new Set([...bottleVolumesMl, val])).sort(
+                          (a, b) => a - b
+                        );
+                        onChangeBottleVolumesMl?.(next);
+                        setNewBottleMlDraft('');
+                      }
+                    }}
+                    className="inline-flex items-center gap-1.5 rounded-lg bg-[var(--theme-accent)] px-3.5 py-1.5 text-xs font-medium text-white hover:bg-[var(--theme-accent-hover)] transition-colors"
+                  >
+                    <Plus className="h-3.5 w-3.5" />
+                    <span>
+                      {tr(language, {
+                        ru: 'Добавить флакон',
+                        en: 'Add bottle',
+                        it: 'Aggiungi flacone',
+                        es: 'Añadir frasco',
+                        de: 'Flakon hinzufügen',
+                      })}
+                    </span>
+                  </button>
                 </div>
               </section>
 

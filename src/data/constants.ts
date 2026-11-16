@@ -18,6 +18,19 @@ import type {
   ViewSettings,
 } from '../types/perfume';
 
+export const FAMILY_HEX_MAP: Record<OlfactoryFamilyKey, string> = {
+  citrus: '#EAB308',
+  floral: '#EC4899',
+  woody: '#8B5E3C',
+  spicy: '#DC2626',
+  amber: '#D97706',
+  green: '#16A34A',
+  musk: '#94A3B8',
+  gourmand: '#A855F7',
+  aquatic: '#0284C7',
+  leathery: '#4B5563',
+};
+
 export const PROJECT_STATUS_LABELS: Record<ProjectStatus, string> = {
   idea: 'Идея',
   formulating: 'В разработке',
@@ -889,6 +902,8 @@ export const DEFAULT_HOME_SECTIONS: HomeSectionsSettings = {
   showRecentNotes: true,
 };
 
+export const DEFAULT_BOTTLE_VOLUMES_ML: number[] = [10, 15, 30, 50, 100];
+
 export const DEFAULT_APP_SETTINGS: AppSettings = {
   language: 'ru',
   currency: 'RUB',
@@ -896,4 +911,6 @@ export const DEFAULT_APP_SETTINGS: AppSettings = {
   colorMode: 'light',
   homeSections: DEFAULT_HOME_SECTIONS,
   criticalStockGrams: 10,
+  defaultConcentrateGrams: 10,
+  bottleVolumesMl: DEFAULT_BOTTLE_VOLUMES_ML,
 };

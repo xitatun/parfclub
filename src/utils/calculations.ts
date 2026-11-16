@@ -1,12 +1,15 @@
 import { EMPTY_PROFILE } from '../data/constants';
+import { FraterworksMaterialPassport, resolveComponentPassport } from '../data/fraterworksProfiles';
 import type {
   AppCurrency,
   AppLanguage,
   FormulaComponent,
   Ingredient,
+  LibraryIngredient,
   MacerationBatch,
   MeasurementUnit,
   OlfactoryFamilyKey,
+  PerfumeProject,
   PurchaseRecord,
 } from '../types/perfume';
 
@@ -84,6 +87,61 @@ export function calculateFormulaSummary(components: FormulaComponent[]): Formula
     costPerGram: totalWeightGrams > 0 ? totalFormulaCost / totalWeightGrams : 0,
     tierPureGrams,
     tierPercentOfPure,
+  };
+}
+
+export function getEffectiveConcentrateGrams(
+  project: Pick<PerfumeProject, 'components' | 'targetConcentrateGrams'>,
+  defaultConcentrateGrams = 10
+): number {
+  if (
+    typeof project.targetConcentrateGrams === 'number' &&
+    Number.isFinite(project.targetConcentrateGrams) &&
+    project.targetConcentrateGrams > 0
+  ) {
+    return project.targetConcentrateGrams;
+  }
+  let aromaticSum = 0;
+  for (const comp of project.components) {
+    if (comp.tier !== 'solvent') {
+      aromaticSum += Math.max(0, Number(comp.weightGrams) || 0);
+    }
+  }
+  if (aromaticSum > 0) {
+    return Number(aromaticSum.toFixed(2));
+  }
+  return Math.max(0.5, Number(defaultConcentrateGrams) || 10);
+}
+
+export function scaleProjectByConcentrateWeight(
+  project: PerfumeProject,
+  newConcentrateGrams: number,
+  defaultConcentrateGrams = 10,
+  updatedDate?: string
+): PerfumeProject {
+  const target = Math.max(0.1, Number(newConcentrateGrams) || defaultConcentrateGrams || 10);
+  const previousBase = getEffectiveConcentrateGrams(project, defaultConcentrateGrams);
+  const hasAromatic = project.components.some(
+    (c) => c.tier !== 'solvent' && (Number(c.weightGrams) || 0) > 0
+  );
+
+  const components =
+    hasAromatic && previousBase > 0
+      ? project.components.map((c) => {
+          if (c.tier === 'solvent') return c;
+          const ratio = target / previousBase;
+          return {
+            ...c,
+            weightGrams: Number((Math.max(0, c.weightGrams) * ratio).toFixed(3)),
+          };
+        })
+      : project.components;
+
+  return {
+    ...project,
+    targetConcentrateGrams: Number(target.toFixed(2)),
+    components,
+    updatedAt: updatedDate || project.updatedAt,
   };
 }
 
@@ -539,3 +597,200 @@ export function calculateFormulaReadiness(
     isComplete,
   };
 }
+
+export interface PerceivedComponentMetric {
+  componentId: string;
+  name: string;
+  pureGrams: number;
+  concentrateMassPercent: number;
+  perceivedImpactPercent: number;
+  impactRatio: number; // perceivedImpactPercent / concentrateMassPercent
+  passport: FraterworksMaterialPassport;
+  openingSharePercent: number;
+  heartSharePercent: number;
+  drydownSharePercent: number;
+}
+
+export interface PerceivedFormulaAnalysis {
+  byComponentId: Record<string, PerceivedComponentMetric>;
+  metrics: PerceivedComponentMetric[];
+  massFamilyProfile: Record<OlfactoryFamilyKey, number>;
+  perceivedFamilyProfile: Record<OlfactoryFamilyKey, number>;
+  stageProfiles: {
+    opening: Record<OlfactoryFamilyKey, number>;
+    heart: Record<OlfactoryFamilyKey, number>;
+    drydown: Record<OlfactoryFamilyKey, number>;
+  };
+  stageDominantMaterials: {
+    opening: Array<{ name: string; sharePercent: number; family: OlfactoryFamilyKey }>;
+    heart: Array<{ name: string; sharePercent: number; family: OlfactoryFamilyKey }>;
+    drydown: Array<{ name: string; sharePercent: number; family: OlfactoryFamilyKey }>;
+  };
+  averageSubstantivityHours: number;
+}
+
+export function calculatePerceivedFormulaImpact(
+  components: FormulaComponent[],
+  ingredients: Ingredient[] = [],
+  library: LibraryIngredient[] = []
+): PerceivedFormulaAnalysis {
+  const aromaticComponents = components.filter(
+    (c) => c.tier !== 'solvent' && (Number(c.weightGrams) || 0) > 0
+  );
+
+  let totalPureGrams = 0;
+  let totalImpactUnits = 0;
+  let totalOpeningUnits = 0;
+  let totalHeartUnits = 0;
+  let totalDrydownUnits = 0;
+  let weightedHoursSum = 0;
+
+  const rawItems = aromaticComponents.map((comp) => {
+    const w = Math.max(0, Number(comp.weightGrams) || 0);
+    const dil = Math.min(100, Math.max(0, Number(comp.dilutionPercent) || 0));
+    const pureGrams = w * (dil / 100);
+    const passport = resolveComponentPassport(comp, ingredients, library);
+    const impactUnits = pureGrams * Math.max(10, passport.odorImpact);
+
+    // Volatility / stage weights based on substantivity hours & tier
+    const hours = passport.substantivityHours;
+    const openingFactor =
+      hours <= 12 ? 2.8 : hours <= 36 ? 1.8 : hours <= 120 ? 0.9 : 0.35;
+    const heartFactor =
+      hours >= 10 && hours <= 140 ? 2.2 : hours < 10 ? 0.45 : 1.1;
+    const drydownFactor =
+      hours >= 180 ? 2.8 : hours >= 96 ? 2.0 : hours >= 36 ? 0.7 : 0.06;
+
+    const openingUnits = impactUnits * openingFactor;
+    const heartUnits = impactUnits * heartFactor;
+    const drydownUnits = impactUnits * drydownFactor;
+
+    totalPureGrams += pureGrams;
+    totalImpactUnits += impactUnits;
+    totalOpeningUnits += openingUnits;
+    totalHeartUnits += heartUnits;
+    totalDrydownUnits += drydownUnits;
+    weightedHoursSum += pureGrams * hours;
+
+    return {
+      comp,
+      pureGrams,
+      passport,
+      impactUnits,
+      openingUnits,
+      heartUnits,
+      drydownUnits,
+    };
+  });
+
+  const massFamilyRaw: Record<OlfactoryFamilyKey, number> = { ...EMPTY_PROFILE };
+  const perceivedFamilyRaw: Record<OlfactoryFamilyKey, number> = { ...EMPTY_PROFILE };
+  const openingFamilyRaw: Record<OlfactoryFamilyKey, number> = { ...EMPTY_PROFILE };
+  const heartFamilyRaw: Record<OlfactoryFamilyKey, number> = { ...EMPTY_PROFILE };
+  const drydownFamilyRaw: Record<OlfactoryFamilyKey, number> = { ...EMPTY_PROFILE };
+
+  const byComponentId: Record<string, PerceivedComponentMetric> = {};
+  const metrics: PerceivedComponentMetric[] = [];
+
+  for (const item of rawItems) {
+    const concentrateMassPercent =
+      totalPureGrams > 0 ? (item.pureGrams / totalPureGrams) * 100 : 0;
+    const perceivedImpactPercent =
+      totalImpactUnits > 0 ? (item.impactUnits / totalImpactUnits) * 100 : 0;
+    const openingSharePercent =
+      totalOpeningUnits > 0 ? (item.openingUnits / totalOpeningUnits) * 100 : 0;
+    const heartSharePercent =
+      totalHeartUnits > 0 ? (item.heartUnits / totalHeartUnits) * 100 : 0;
+    const drydownSharePercent =
+      totalDrydownUnits > 0 ? (item.drydownUnits / totalDrydownUnits) * 100 : 0;
+
+    const metric: PerceivedComponentMetric = {
+      componentId: item.comp.id,
+      name: item.comp.name,
+      pureGrams: item.pureGrams,
+      concentrateMassPercent,
+      perceivedImpactPercent,
+      impactRatio:
+        concentrateMassPercent > 0.01 ? perceivedImpactPercent / concentrateMassPercent : 1,
+      passport: item.passport,
+      openingSharePercent,
+      heartSharePercent,
+      drydownSharePercent,
+    };
+
+    byComponentId[item.comp.id] = metric;
+    metrics.push(metric);
+
+    massFamilyRaw[item.comp.family] =
+      (massFamilyRaw[item.comp.family] || 0) + concentrateMassPercent;
+
+    // Distribute perceived scent across Fraterworks multi-facet scentBreakdown
+    const breakdown = item.passport.scentBreakdown;
+    if (breakdown && breakdown.length > 0) {
+      const sumFacetPct = breakdown.reduce((acc, f) => acc + f.percent, 0) || 100;
+      for (const facet of breakdown) {
+        const wShare = facet.percent / sumFacetPct;
+        perceivedFamilyRaw[facet.family] =
+          (perceivedFamilyRaw[facet.family] || 0) + perceivedImpactPercent * wShare;
+        openingFamilyRaw[facet.family] =
+          (openingFamilyRaw[facet.family] || 0) + openingSharePercent * wShare;
+        heartFamilyRaw[facet.family] =
+          (heartFamilyRaw[facet.family] || 0) + heartSharePercent * wShare;
+        drydownFamilyRaw[facet.family] =
+          (drydownFamilyRaw[facet.family] || 0) + drydownSharePercent * wShare;
+      }
+    } else {
+      perceivedFamilyRaw[item.comp.family] =
+        (perceivedFamilyRaw[item.comp.family] || 0) + perceivedImpactPercent;
+      openingFamilyRaw[item.comp.family] =
+        (openingFamilyRaw[item.comp.family] || 0) + openingSharePercent;
+      heartFamilyRaw[item.comp.family] =
+        (heartFamilyRaw[item.comp.family] || 0) + heartSharePercent;
+      drydownFamilyRaw[item.comp.family] =
+        (drydownFamilyRaw[item.comp.family] || 0) + drydownSharePercent;
+    }
+  }
+
+  const roundProfile = (
+    raw: Record<OlfactoryFamilyKey, number>
+  ): Record<OlfactoryFamilyKey, number> => {
+    const out: Record<OlfactoryFamilyKey, number> = { ...EMPTY_PROFILE };
+    (Object.keys(out) as OlfactoryFamilyKey[]).forEach((k) => {
+      out[k] = Math.round((raw[k] || 0) * 10) / 10;
+    });
+    return out;
+  };
+
+  const getTopStage = (
+    pickShare: (m: PerceivedComponentMetric) => number
+  ): Array<{ name: string; sharePercent: number; family: OlfactoryFamilyKey }> =>
+    [...metrics]
+      .sort((a, b) => pickShare(b) - pickShare(a))
+      .slice(0, 4)
+      .filter((m) => pickShare(m) > 0.5)
+      .map((m) => ({
+        name: m.name,
+        sharePercent: Math.round(pickShare(m) * 10) / 10,
+        family: m.passport.family,
+      }));
+
+  return {
+    byComponentId,
+    metrics,
+    massFamilyProfile: roundProfile(massFamilyRaw),
+    perceivedFamilyProfile: roundProfile(perceivedFamilyRaw),
+    stageProfiles: {
+      opening: roundProfile(openingFamilyRaw),
+      heart: roundProfile(heartFamilyRaw),
+      drydown: roundProfile(drydownFamilyRaw),
+    },
+    stageDominantMaterials: {
+      opening: getTopStage((m) => m.openingSharePercent),
+      heart: getTopStage((m) => m.heartSharePercent),
+      drydown: getTopStage((m) => m.drydownSharePercent),
+    },
+    averageSubstantivityHours:
+      totalPureGrams > 0 ? Math.round(weightedHoursSum / totalPureGrams) : 0,
+  };
+}
+
